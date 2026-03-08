@@ -5,6 +5,9 @@ using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
 using MudBlazor.Services;
 
 var builder = WebAssemblyHostBuilder.CreateDefault(args);
+builder.Logging.SetMinimumLevel(LogLevel.Debug);
+builder.Logging.AddFilter("Microsoft", LogLevel.Warning);
+builder.Logging.AddFilter("MbWasmStandaloneNomeroff", LogLevel.Debug);
 builder.RootComponents.Add<App>("#app");
 builder.RootComponents.Add<HeadOutlet>("head::after");
 
@@ -13,5 +16,6 @@ builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri(builder.
 builder.Services.AddScoped<SettingsService>();
 builder.Services.AddScoped<NomeroffService>();
 builder.Services.AddScoped<RecordsService>();
+builder.Services.AddSingleton<RecognitionStateService>();
 
 await builder.Build().RunAsync();

@@ -11,20 +11,46 @@
 <MudPaper Class="pa-4" Outlined="true">
     <MudTextField @bind-Value="_deviceName" Margin="Margin.Dense" Label="Имя устройства" Variant="Variant.Outlined" FullWidth="true"
                   HelperText="Используется при сохранении записей в БД (S_DEVICEID). По умолчанию — имя ПК." Class="mb-4" />
-    @*<MudButton Variant="Variant.Outlined" Color="Color.Secondary" OnClick="LoadDefaultDeviceName" Class="mb-4">
-        Загрузить имя ПК с сервера
-    </MudButton>*@
-    <MudTextField @bind-Value="_apiBaseUrl" Margin="Margin.Dense" Label="URL API Nomeroff (Python)" Variant="Variant.Outlined" FullWidth="true"
-                  HelperText="http://127.0.0.1:8000" Class="mb-4" />
-    <MudTextField @bind-Value="_recordsApiBaseUrl" Margin="Margin.Dense" Label="URL API записей (БД)" Variant="Variant.Outlined" FullWidth="true"
-                  HelperText="http://localhost:5000 — Nomeroff.Interbase.Api" Class="mb-4" />
-    <MudTextField @bind-Value="_gpsApiBaseUrl" Margin="Margin.Dense" Label="URL GPS API" Variant="Variant.Outlined" FullWidth="true"
-                  HelperText="http://localhost:5001 — Nomeroff.Gps.Api (NMEA COM-порт)" Class="mb-4" />
-    <MudTextField @bind-Value="_captureIntervalMsStr" Margin="Margin.Dense" Label="Интервал авто-кадров (мс)" Variant="Variant.Outlined"
-                  HelperText="500–60000, например 1500" Class="mb-4" />
-    <MudTextField @bind-Value="_dedupIntervalSecStr" Margin="Margin.Dense" Label="Интервал дедупликации записи в БД (с)" Variant="Variant.Outlined"
-                  HelperText="Как часто записывать один и тот же номер (0–86400)" Class="mb-4" />
-    <MudSwitch T="bool" @bind-Checked="_autoStart" Label="Автостарт распознавания при запуске камеры" Color="Color.Primary" Class="mb-4" />
+
+
+    <MudGrid>
+        <MudItem xs="6">
+            <MudTextField @bind-Value="_apiBaseUrl" Margin="Margin.Dense" Label="URL API Nomeroff (Python)" Variant="Variant.Outlined" FullWidth="true"
+                          HelperText="http://127.0.0.1:8000" Class="mb-4" />
+        </MudItem>
+        <MudItem xs="6">
+            <MudTextField @bind-Value="_gpsApiBaseUrl" Margin="Margin.Dense" Label="URL GPS API" Variant="Variant.Outlined" FullWidth="true"
+                          HelperText="http://localhost:5551 — Nomeroff.Gps.Api (NMEA COM-порт)" Class="mb-4" />
+        </MudItem>
+    </MudGrid>
+    <MudGrid>
+        <MudItem xs="6">
+            <MudTextField @bind-Value="_recordsApiBaseUrl" Margin="Margin.Dense" Label="URL API записей (БД)" Variant="Variant.Outlined" FullWidth="true"
+                          HelperText="http://localhost:5552 — Nomeroff.Interbase.Api" Class="mb-4" />
+        </MudItem>
+        <MudItem xs="6">
+            <MudTextField @bind-Value="_videoApiBaseUrl" Margin="Margin.Dense" Label="URL Video API" Variant="Variant.Outlined" FullWidth="true"
+                          HelperText="http://localhost:5553 — Nomeroff.Video.Api (ffmpeg + Python)" Class="mb-4" />
+        </MudItem>
+    </MudGrid>
+    <MudGrid>
+        <MudItem xs="6">
+            <MudTextField @bind-Value="_captureIntervalMsStr" Margin="Margin.Dense" Label="Интервал авто-кадров (мс)" Variant="Variant.Outlined"
+                          HelperText="500–60000, например 1500" Class="mb-4" />
+        </MudItem>
+        <MudItem xs="6">
+            <MudTextField @bind-Value="_dedupIntervalSecStr" Margin="Margin.Dense" Label="Интервал дедупликации записи в БД (с)" Variant="Variant.Outlined"
+                          HelperText="Как часто записывать один и тот же номер (0–86400)" Class="mb-4" />
+        </MudItem>
+    </MudGrid>
+    <MudGrid>
+        <MudItem xs="6">
+            <MudSwitch T="bool" @bind-Value="_autoStart" Label="Автостарт при первом запуске программы" Color="Color.Primary" Class="mb-4" />
+        </MudItem>
+        <MudItem xs="6">
+            <MudSwitch T="bool" @bind-Value="_skipSaveWithoutGps"  Label="Не записывать в БД при отсутствии координат GPS" Color="Color.Primary" Class="mb-4" />
+        </MudItem>
+    </MudGrid>
     
     <MudGrid>
         <MudItem xs="3">
@@ -74,11 +100,13 @@
 @code {
     private string _deviceName = "";
     private string _apiBaseUrl = "http://127.0.0.1:8000";
-    private string _recordsApiBaseUrl = "http://localhost:5000";
-    private string _gpsApiBaseUrl = "http://localhost:5001";
+    private string _recordsApiBaseUrl = "http://localhost:5552";
+    private string _gpsApiBaseUrl = "http://localhost:5551";
+    private string _videoApiBaseUrl = "http://localhost:5553";
     private string _captureIntervalMsStr = "1500";
     private string _dedupIntervalSecStr = "300";
     private bool _autoStart;
+    private bool _skipSaveWithoutGps;
     private string? _cameraDeviceId;
     private string? _gpsPort;
     private List<CameraDevice> _cameraDevices = new();
@@ -94,9 +122,11 @@
         _apiBaseUrl = await SettingsSvc.GetApiBaseUrlAsync();
         _recordsApiBaseUrl = await SettingsSvc.GetRecordsApiBaseUrlAsync();
         _gpsApiBaseUrl = await SettingsSvc.GetGpsApiBaseUrlAsync();
+        _videoApiBaseUrl = await SettingsSvc.GetVideoApiBaseUrlAsync();
         _captureIntervalMsStr = (await SettingsSvc.GetCaptureIntervalMsAsync()).ToString();
         _dedupIntervalSecStr = (await SettingsSvc.GetDedupIntervalSecAsync()).ToString();
         _autoStart = await SettingsSvc.GetAutoStartAsync();
+        _skipSaveWithoutGps = await SettingsSvc.GetSkipSaveWithoutGpsAsync();
         _cameraDeviceId = await SettingsSvc.GetCameraDeviceIdAsync();
         _gpsPort = await SettingsSvc.GetGpsPortAsync();
         await LoadCameras();
@@ -183,19 +213,36 @@
         catch { }
         StateHasChanged();
     }
+    /*
+    private async Task OnAutoStartChanged(bool value)
+    {
+        _autoStart = value;
+        await SettingsSvc.SetAutoStartAsync(value);
+        Snackbar.Add(value ? "Автостарт включён" : "Автостарт выключен", Severity.Info, options => { options.VisibleStateDuration = 2000; });
+        StateHasChanged();
+    }
 
+    private async Task OnSkipSaveWithoutGpsChanged(bool value)
+    {
+        _skipSaveWithoutGps = value;
+        await SettingsSvc.SetSkipSaveWithoutGpsAsync(value);
+        Snackbar.Add(value ? "Запись без GPS отключена" : "Запись без GPS разрешена", Severity.Info, options => { options.VisibleStateDuration = 2000; });
+        StateHasChanged();
+    }
+    */
     private async Task Save()
     {
         await SettingsSvc.SetDeviceNameAsync(_deviceName);
         await SettingsSvc.SetApiBaseUrlAsync(_apiBaseUrl);
         await SettingsSvc.SetRecordsApiBaseUrlAsync(_recordsApiBaseUrl);
         await SettingsSvc.SetGpsApiBaseUrlAsync(_gpsApiBaseUrl);
+        await SettingsSvc.SetVideoApiBaseUrlAsync(_videoApiBaseUrl);
         await SettingsSvc.SetCaptureIntervalMsAsync(int.TryParse(_captureIntervalMsStr, out var ms) ? ms : 1500);
         await SettingsSvc.SetDedupIntervalSecAsync(int.TryParse(_dedupIntervalSecStr, out var sec) ? sec : 300);
         await SettingsSvc.SetAutoStartAsync(_autoStart);
+        await SettingsSvc.SetSkipSaveWithoutGpsAsync(_skipSaveWithoutGps);
         await SettingsSvc.SetCameraDeviceIdAsync(_cameraDeviceId);
         await SettingsSvc.SetGpsPortAsync(_gpsPort);
-        SettingsSvc.InvalidateCache();
         Snackbar.Add("Настройки сохранены", Severity.Success);
     }
 

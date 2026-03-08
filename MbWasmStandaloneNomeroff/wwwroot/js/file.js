@@ -93,6 +93,32 @@ window.fileReader = {
     },
 
 
+    /** Загрузить видео из base64, дождаться metadata, вызвать callback с duration. */
+    async loadVideoAndGetDuration(base64, contentType, videoElementId, dotNetRef) {
+        var video = document.getElementById(videoElementId);
+        if (!video) throw new Error('Video element not found: ' + videoElementId);
+        return new Promise(function (resolve, reject) {
+            try {
+                var binary = atob(base64);
+                var bytes = new Uint8Array(binary.length);
+                for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                var blob = new Blob([bytes], { type: contentType || 'video/mp4' });
+                var url = URL.createObjectURL(blob);
+                video.src = url;
+                video.onloadedmetadata = function () {
+                    URL.revokeObjectURL(url);
+                    resolve(video.duration);
+                };
+                video.onerror = function () {
+                    URL.revokeObjectURL(url);
+                    reject(new Error('Video load error: ' + (video.error ? video.error.message : 'unknown')));
+                };
+            } catch (e) {
+                reject(e);
+            }
+        });
+    },
+
     getVideoFrameAt(videoElementId, timeSeconds, maxWidth) {
         var video = document.getElementById(videoElementId);
         if (!video) {

@@ -9,11 +9,13 @@ public class RecordsService
 {
     private readonly HttpClient _http;
     private readonly SettingsService _settings;
+    private readonly ILogger<RecordsService>? _logger;
 
-    public RecordsService(HttpClient http, SettingsService settings)
+    public RecordsService(HttpClient http, SettingsService settings, ILogger<RecordsService>? logger = null)
     {
         _http = http;
         _settings = settings;
+        _logger = logger;
     }
 
     private async Task<HttpClient?> GetRecordsApiClientAsync()
@@ -68,6 +70,21 @@ public class RecordsService
         catch { return false; }
     }
 
+    /// <summary>Получить текущую позицию с GPS API (NMEA COM).</summary>
+    public async Task<(double? lat, double? lon)> GetGpsPositionAsync(CancellationToken ct = default)
+    {
+        using var client = await GetGpsApiClientAsync();
+        if (client == null) return (null, null);
+        try
+        {
+            var r = await client.GetFromJsonAsync<JsonElement>("api/position", ct);
+            if (r.TryGetProperty("latitude", out var latProp) && r.TryGetProperty("longitude", out var lonProp))
+                return (latProp.GetDouble(), lonProp.GetDouble());
+        }
+        catch { }
+        return (null, null);
+    }
+
     public async Task<(bool success, string message)> TestGpsAsync(CancellationToken ct = default)
     {
         using var client = await GetGpsApiClientAsync();
@@ -84,18 +101,76 @@ public class RecordsService
         catch (Exception ex) { return (false, ex.Message); }
     }
 
-    public async Task<(bool success, string message)> TestDbAsync(CancellationToken ct = default)
+    public async Task<(bool success, string message)> TestDbAsync(string? db = null, CancellationToken ct = default)
     {
         using var client = await GetRecordsApiClientAsync();
-        if (client == null) return (false, "API записей не настроен.");
+        if (client == null)
+        {
+            _logger?.LogDebug("TestDbAsync: API не настроен");
+            return (false, "API записей не настроен.");
+        }
+        var url = string.IsNullOrEmpty(db) ? "api/db/test" : $"api/db/test?db={Uri.EscapeDataString(db)}";
         try
         {
-            var r = await client.GetFromJsonAsync<JsonElement>("api/db/test", ct);
+            _logger?.LogDebug("TestDbAsync: GET {Url}", url);
+            var r = await client.GetFromJsonAsync<JsonElement>(url, ct);
             var ok = r.TryGetProperty("success", out var s) && s.GetBoolean();
             var msg = r.TryGetProperty("message", out var m) ? m.GetString() : null;
+            _logger?.LogInformation("TestDbAsync: success={Success}, message={Message}", ok, msg);
             return (ok, msg ?? (ok ? "OK" : "Ошибка"));
         }
-        catch (Exception ex) { return (false, ex.Message); }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "TestDbAsync failed for db={Db}", db);
+            return (false, ex.Message);
+        }
+    }
+
+    /// <summary>Получить имя БД для текущей даты (yyyy-MM-dd.IBS). Создаёт БД при смене даты.</summary>
+    public async Task<string?> GetOrCreateCurrentDbAsync(CancellationToken ct = default)
+    {
+        var today = DateTime.Now.ToString("yyyy-MM-dd");
+        var dbFileName = today + ".IBS";
+        var (storedDb, storedDate) = await _settings.GetCurrentDbAsync();
+        if (storedDate == today && !string.IsNullOrEmpty(storedDb))
+        {
+            var db = storedDb.EndsWith(".IBS", StringComparison.OrdinalIgnoreCase) ? storedDb : storedDb + ".IBS";
+            _logger?.LogDebug("GetOrCreateCurrentDbAsync: используем {Db}", db);
+            return db;
+        }
+        _logger?.LogInformation("GetOrCreateCurrentDbAsync: создаём БД {Db} для даты {Date}", dbFileName, today);
+        await CreateDbIfNeededAsync(dbFileName, ct);
+        await _settings.SetCurrentDbAsync(dbFileName, today);
+        return dbFileName;
+    }
+
+    private async Task CreateDbIfNeededAsync(string name, CancellationToken ct)
+    {
+        var baseUrl = await _settings.GetRecordsApiBaseUrlAsync();
+        if (string.IsNullOrEmpty(baseUrl)) return;
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/") };
+            _logger?.LogDebug("CreateDbIfNeededAsync: POST api/db/create name={Name}", name);
+            var resp = await client.PostAsJsonAsync("api/db/create", new { name }, ct);
+            if (resp.IsSuccessStatusCode)
+            {
+                _logger?.LogInformation("CreateDbIfNeededAsync: БД {Name} создана", name);
+                return;
+            }
+            var json = await resp.Content.ReadFromJsonAsync<JsonElement>(ct);
+            var msg = json.TryGetProperty("message", out var m) ? m.GetString() : "";
+            if (msg?.Contains("уже", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                _logger?.LogDebug("CreateDbIfNeededAsync: БД {Name} уже существует", name);
+                return;
+            }
+            _logger?.LogWarning("CreateDbIfNeededAsync: не удалось создать {Name}, {Msg}", name, msg);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "CreateDbIfNeededAsync failed for {Name}", name);
+        }
     }
 
     public async Task<bool> SaveRecordAsync(RecordDto record, CancellationToken ct = default)
@@ -118,24 +193,17 @@ public class RecordsService
         }
     }
 
-    /// <summary>Загрузить видео на Records API: ffmpeg разбивает на кадры, кадры уходят в Python API. URL Python передаётся в заголовке.</summary>
+    /// <summary>Загрузить видео на Nomeroff.Video.Api (ffmpeg → кадры → Python API).</summary>
     public async Task<ProcessVideoResponse?> ProcessVideoAsync(Stream videoStream, string fileName, int intervalSec, CancellationToken ct = default)
     {
-        var baseUrl = await _settings.GetRecordsApiBaseUrlAsync();
+        var baseUrl = await _settings.GetVideoApiBaseUrlAsync();
         if (string.IsNullOrEmpty(baseUrl)) return null;
-        var nomeroffUrl = await _settings.GetApiBaseUrlAsync();
         try
         {
             using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(15) };
             using var content = new MultipartFormDataContent();
             content.Add(new StreamContent(videoStream), "file", fileName);
-            using var req = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/api/process-video?intervalSec={intervalSec}")
-            {
-                Content = content
-            };
-            if (!string.IsNullOrEmpty(nomeroffUrl))
-                req.Headers.TryAddWithoutValidation("X-Nomeroff-Api-Base-Url", nomeroffUrl);
-            var response = await client.SendAsync(req, ct);
+            var response = await client.PostAsync($"{baseUrl}/api/process-video?intervalSec={intervalSec}", content, ct);
             if (!response.IsSuccessStatusCode) return null;
             return await response.Content.ReadFromJsonAsync<ProcessVideoResponse>(cancellationToken: ct);
         }

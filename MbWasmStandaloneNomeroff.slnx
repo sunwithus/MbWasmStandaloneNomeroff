@@ -2,4 +2,5 @@
   <Project Path="MbWasmStandaloneNomeroff/MbWasmStandaloneNomeroff.csproj" />
   <Project Path="Nomeroff.Gps.Api/Nomeroff.Gps.Api.csproj" />
   <Project Path="Nomeroff.Interbase.Api/Nomeroff.Interbase.Api.csproj" />
+  <Project Path="Nomeroff.Video.Api/Nomeroff.Video.Api.csproj" />
 </Solution>
