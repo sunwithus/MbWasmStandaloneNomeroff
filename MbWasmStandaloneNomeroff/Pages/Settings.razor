@@ -1,0 +1,207 @@
+@page "/settings"
+@inject SettingsService SettingsSvc
+@inject RecordsService RecordsSvc
+@inject ISnackbar Snackbar
+@inject IJSRuntime JS
+
+<PageTitle>Настройки</PageTitle>
+
+<MudText Typo="Typo.h4" GutterBottom="true">Настройки</MudText>
+
+<MudPaper Class="pa-4" Outlined="true">
+    <MudTextField @bind-Value="_deviceName" Margin="Margin.Dense" Label="Имя устройства" Variant="Variant.Outlined" FullWidth="true"
+                  HelperText="Используется при сохранении записей в БД (S_DEVICEID). По умолчанию — имя ПК." Class="mb-4" />
+    @*<MudButton Variant="Variant.Outlined" Color="Color.Secondary" OnClick="LoadDefaultDeviceName" Class="mb-4">
+        Загрузить имя ПК с сервера
+    </MudButton>*@
+    <MudTextField @bind-Value="_apiBaseUrl" Margin="Margin.Dense" Label="URL API Nomeroff (Python)" Variant="Variant.Outlined" FullWidth="true"
+                  HelperText="http://127.0.0.1:8000" Class="mb-4" />
+    <MudTextField @bind-Value="_recordsApiBaseUrl" Margin="Margin.Dense" Label="URL API записей (БД)" Variant="Variant.Outlined" FullWidth="true"
+                  HelperText="http://localhost:5000 — Nomeroff.Interbase.Api" Class="mb-4" />
+    <MudTextField @bind-Value="_gpsApiBaseUrl" Margin="Margin.Dense" Label="URL GPS API" Variant="Variant.Outlined" FullWidth="true"
+                  HelperText="http://localhost:5001 — Nomeroff.Gps.Api (NMEA COM-порт)" Class="mb-4" />
+    <MudTextField @bind-Value="_captureIntervalMsStr" Margin="Margin.Dense" Label="Интервал авто-кадров (мс)" Variant="Variant.Outlined"
+                  HelperText="500–60000, например 1500" Class="mb-4" />
+    <MudTextField @bind-Value="_dedupIntervalSecStr" Margin="Margin.Dense" Label="Интервал дедупликации записи в БД (с)" Variant="Variant.Outlined"
+                  HelperText="Как часто записывать один и тот же номер (0–86400)" Class="mb-4" />
+    <MudSwitch T="bool" @bind-Checked="_autoStart" Label="Автостарт распознавания при запуске камеры" Color="Color.Primary" Class="mb-4" />
+    
+    <MudGrid>
+        <MudItem xs="3">
+            <MudSelect T="string" @bind-Value="_cameraDeviceId" Margin="Margin.Dense" Label="Камера" Variant="Variant.Outlined" FullWidth="true" Clearable="true" HelperText="Оставьте пустым для камеры по умолчанию">
+                @foreach (var d in _cameraDevices)
+                {
+                    <MudSelectItem T="string" Value="@d.DeviceId">@d.Label</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="9">
+            <MudButton FullWidth="false" Style="height: 40px; top: 8px; text-transform:none;" Variant="Variant.Filled" Color="Color.Primary" OnClick="LoadCameras" StartIcon="@Icons.Material.Filled.Refresh">Обновить список камер</MudButton>
+        </MudItem>
+    </MudGrid>
+
+    <MudDivider Class="my-4" />
+    <MudText Typo="Typo.subtitle2" Class="mb-2">GPS (внешнее устройство через API)</MudText>
+    
+    <MudGrid>
+        <MudItem xs="3">
+            <MudSelect T="string" @bind-Value="_gpsPort" Margin="Margin.Dense" Label="GPS (COM-порт)" Variant="Variant.Outlined" FullWidth="true" Clearable="true"
+                       HelperText="Выберите порт и нажмите «Подключить»" Class="mb-4">
+                @foreach (var p in _gpsPorts)
+                {
+                    <MudSelectItem T="string" Value="@p">@p</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="9">
+            <MudStack Row="true" Spacing="2" Class="mb-4">
+                <MudButton Style="height: 40px; top: 8px; text-transform:none;" Variant="Variant.Outlined" OnClick="LoadGpsPorts" StartIcon="@Icons.Material.Filled.Refresh">Обновить порты</MudButton>
+                <MudButton Style="height: 40px; top: 8px; text-transform:none;" Variant="Variant.Outlined" Color="Color.Primary" OnClick="ConnectGps" Disabled="@string.IsNullOrEmpty(_gpsPort)">Подключить GPS</MudButton>
+                <MudButton Style="height: 40px; top: 8px; text-transform:none;" Variant="Variant.Outlined" Color="Color.Secondary" OnClick="TestBrowserGps">Тест браузер GPS</MudButton>
+                <MudButton Style="height: 40px; top: 8px; text-transform:none;" Variant="Variant.Filled" Color="Color.Secondary" OnClick="TestRealGps">Тест реальный GPS (API)</MudButton>
+            </MudStack>
+        </MudItem>
+    </MudGrid>
+    @if (!string.IsNullOrEmpty(_gpsTestMessage))
+    {
+        <MudAlert Severity="@(_gpsTestSuccess ? Severity.Success : Severity.Warning)" Dense="true" Class="mb-4">@_gpsTestMessage</MudAlert>
+    }
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" Class="mt-4" OnClick="Save">
+        Сохранить
+    </MudButton>
+</MudPaper>
+
+@code {
+    private string _deviceName = "";
+    private string _apiBaseUrl = "http://127.0.0.1:8000";
+    private string _recordsApiBaseUrl = "http://localhost:5000";
+    private string _gpsApiBaseUrl = "http://localhost:5001";
+    private string _captureIntervalMsStr = "1500";
+    private string _dedupIntervalSecStr = "300";
+    private bool _autoStart;
+    private string? _cameraDeviceId;
+    private string? _gpsPort;
+    private List<CameraDevice> _cameraDevices = new();
+    private List<string> _gpsPorts = new();
+    private string? _gpsTestMessage;
+    private bool _gpsTestSuccess;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _deviceName = await SettingsSvc.GetDeviceNameAsync();
+        if (string.IsNullOrEmpty(_deviceName))
+            await LoadDefaultDeviceName();
+        _apiBaseUrl = await SettingsSvc.GetApiBaseUrlAsync();
+        _recordsApiBaseUrl = await SettingsSvc.GetRecordsApiBaseUrlAsync();
+        _gpsApiBaseUrl = await SettingsSvc.GetGpsApiBaseUrlAsync();
+        _captureIntervalMsStr = (await SettingsSvc.GetCaptureIntervalMsAsync()).ToString();
+        _dedupIntervalSecStr = (await SettingsSvc.GetDedupIntervalSecAsync()).ToString();
+        _autoStart = await SettingsSvc.GetAutoStartAsync();
+        _cameraDeviceId = await SettingsSvc.GetCameraDeviceIdAsync();
+        _gpsPort = await SettingsSvc.GetGpsPortAsync();
+        await LoadCameras();
+        await LoadGpsPorts();
+    }
+
+    private async Task LoadDefaultDeviceName()
+    {
+        var name = await RecordsSvc.GetDeviceNameFromApiAsync();
+        if (!string.IsNullOrEmpty(name))
+        {
+            _deviceName = name;
+            await SettingsSvc.SetDeviceNameAsync(name);
+            Snackbar.Add($"Загружено имя ПК: {name}", Severity.Info);
+            StateHasChanged();
+        }
+    }
+
+    private async Task LoadGpsPorts()
+    {
+        var ports = await RecordsSvc.GetGpsPortsAsync();
+        _gpsPorts = ports.ToList();
+        StateHasChanged();
+    }
+
+    private async Task ConnectGps()
+    {
+        if (string.IsNullOrEmpty(_gpsPort)) return;
+        var ok = await RecordsSvc.ConnectGpsAsync(_gpsPort);
+        await SettingsSvc.SetGpsPortAsync(_gpsPort);
+        Snackbar.Add(ok ? "GPS подключен" : "Ошибка подключения GPS", ok ? Severity.Success : Severity.Error);
+    }
+
+    private async Task TestBrowserGps()
+    {
+        _gpsTestMessage = null;
+        try
+        {
+            var pos = await JS.InvokeAsync<GpsPos>("gps.getCurrentPosition");
+            if (pos != null)
+            {
+                _gpsTestSuccess = true;
+                _gpsTestMessage = $"Браузер GPS: Широта {pos.Latitude:F6}, Долгота {pos.Longitude:F6}";
+            }
+        }
+        catch (Exception ex)
+        {
+            _gpsTestSuccess = false;
+            _gpsTestMessage = $"Браузер GPS: {ex.Message}";
+        }
+        StateHasChanged();
+    }
+
+    private async Task TestRealGps()
+    {
+        _gpsTestMessage = null;
+        var (success, msg) = await RecordsSvc.TestGpsAsync();
+        _gpsTestSuccess = success;
+        _gpsTestMessage = $"Реальный GPS (NMEA): {msg}";
+        StateHasChanged();
+    }
+
+    private sealed class GpsPos
+    {
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+    }
+
+    private async Task LoadCameras()
+    {
+        try
+        {
+            var list = await JS.InvokeAsync<JsonElement>("camera.listVideoDevices");
+            _cameraDevices.Clear();
+            if (list.ValueKind == JsonValueKind.Array)
+                foreach (var item in list.EnumerateArray())
+                {
+                    var id = item.TryGetProperty("deviceId", out var di) ? di.GetString() : "";
+                    var label = item.TryGetProperty("label", out var dl) ? dl.GetString() : id;
+                    if (!string.IsNullOrEmpty(id))
+                        _cameraDevices.Add(new CameraDevice { DeviceId = id, Label = label ?? id });
+                }
+        }
+        catch { }
+        StateHasChanged();
+    }
+
+    private async Task Save()
+    {
+        await SettingsSvc.SetDeviceNameAsync(_deviceName);
+        await SettingsSvc.SetApiBaseUrlAsync(_apiBaseUrl);
+        await SettingsSvc.SetRecordsApiBaseUrlAsync(_recordsApiBaseUrl);
+        await SettingsSvc.SetGpsApiBaseUrlAsync(_gpsApiBaseUrl);
+        await SettingsSvc.SetCaptureIntervalMsAsync(int.TryParse(_captureIntervalMsStr, out var ms) ? ms : 1500);
+        await SettingsSvc.SetDedupIntervalSecAsync(int.TryParse(_dedupIntervalSecStr, out var sec) ? sec : 300);
+        await SettingsSvc.SetAutoStartAsync(_autoStart);
+        await SettingsSvc.SetCameraDeviceIdAsync(_cameraDeviceId);
+        await SettingsSvc.SetGpsPortAsync(_gpsPort);
+        SettingsSvc.InvalidateCache();
+        Snackbar.Add("Настройки сохранены", Severity.Success);
+    }
+
+    private sealed class CameraDevice
+    {
+        public string DeviceId { get; set; } = "";
+        public string Label { get; set; } = "";
+    }
+}

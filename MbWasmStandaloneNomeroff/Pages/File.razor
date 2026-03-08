@@ -1,0 +1,307 @@
+@* File.razor — изображения через InputFile; видео загружается на Records API (ffmpeg + Python), без загрузки в память браузера *@
+
+@page "/file"
+@inject RecordsService Records
+@inject NomeroffService Nomeroff
+@inject SettingsService SettingsSvc
+@inject ISnackbar Snackbar
+
+<PageTitle>Файл — изображение или видео</PageTitle>
+
+<MudText Typo="Typo.h4" GutterBottom="true">Загрузка файла</MudText>
+<MudText Typo="Typo.body2" Class="mb-4">Выберите изображение или видео. Изображение обрабатывается сразу; видео отправляется на сервер (ffmpeg → кадры → распознавание), без загрузки в память браузера.</MudText>
+
+<MudPaper Class="pa-4" Outlined="true">
+    <MudStack Spacing="2">
+        <InputFile OnChange="OnFileSelected" accept="image/*,video/*" disabled="@_processing">
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Upload" Style="cursor:pointer;">
+                Выбрать файл (фото или видео)
+            </MudButton>
+        </InputFile>
+
+        @if (_selectedVideoFile != null)
+        {
+            <MudAlert Severity="Severity.Info" Dense="true">
+                Видео: @_selectedVideoName (@FormatFileSize(_selectedVideoFile.Size))
+            </MudAlert>
+            <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
+                <MudNumericField T="int" @bind-Value="_videoIntervalSec" Label="Интервал (сек)" Min="1" Max="60" Style="width:120px;" Disabled="@_processing" />
+                <MudCheckBox T="bool" @bind-Value="_saveVideoToDb" Label="Сохранять в БД" Color="Color.Primary" Disabled="@_processing" />
+                <MudButton Variant="Variant.Outlined" Disabled="@_processing" OnClick="ProcessVideoOnServer">
+                    Запустить распознавание на сервере
+                </MudButton>
+            </MudStack>
+            @if (_processing)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Style="height:6px;" Class="mt-2" />
+                <MudText Typo="Typo.caption">Загрузка и обработка на сервере (ffmpeg + Python)...</MudText>
+            }
+        }
+    </MudStack>
+</MudPaper>
+
+@if (_imagePreviewUrl != null)
+{
+    <MudPaper Class="pa-2 mt-4" Outlined="true">
+        <MudText Typo="Typo.subtitle2" Class="mb-2">Предпросмотр</MudText>
+        <img src="@_imagePreviewUrl" style="max-width:100%; max-height:300px;" alt="preview" />
+    </MudPaper>
+}
+
+@if (_lastResponse != null)
+{
+    <MudPaper Class="pa-4 mt-4" Outlined="true">
+        <MudText Typo="Typo.subtitle2" GutterBottom="true">Последний результат</MudText>
+        <MudText Typo="Typo.body2">@_lastResponse.Message</MudText>
+        <MudText Typo="Typo.caption" Color="Color.Secondary">Время: @(_lastResponse.ProcessingTimeMs) мс</MudText>
+        @if (_lastResponse.Plates.Count > 0)
+        {
+            <MudStack Row="true" Spacing="1" Class="mt-2" Style="flex-wrap:wrap;">
+                @foreach (var p in _lastResponse.Plates)
+                {
+                    <MudChip T="string" Size="Size.Small" Color="@(p.IsInWatchlist ? Color.Error : Color.Default)">
+                        @p.Plate
+                        @if (p.IsInWatchlist) { <MudIcon Icon="@Icons.Material.Filled.Warning" Size="Size.Small" Class="ms-1" /> }
+                        @if (p.IsDuplicate) { <MudText Typo="Typo.caption" Color="Color.Secondary">(дубль)</MudText> }
+                    </MudChip>
+                }
+            </MudStack>
+        }
+    </MudPaper>
+}
+
+@if (_videoResults.Count > 0)
+{
+    <MudPaper Class="pa-4 mt-4" Outlined="true">
+        <MudText Typo="Typo.subtitle2" GutterBottom="true">Номера по видео</MudText>
+
+        @if (_videoSummary is not null)
+        {
+            <MudText Typo="Typo.body2">
+                Файл: @_selectedVideoName (@FormatFileSize(_selectedVideoFile?.Size ?? 0))
+            </MudText>
+            <MudText Typo="Typo.body2">
+                Интервал кадров: @_videoSummary.IntervalSec с, обработано кадров: @_videoSummary.TotalFrames,
+                кадров с номерами: @_videoSummary.FramesWithPlates,
+                всего номеров: @_videoSummary.TotalPlates,
+                уникальных номеров: @_videoSummary.UniquePlates
+            </MudText>
+        }
+
+        <MudStack Row="true" Spacing="1" Style="flex-wrap:wrap;">
+            @foreach (var r in _videoResults.OrderByDescending(x => x.TimeSec).Take(50))
+            {
+                <MudChip T="string" Size="Size.Small" Color="@(r.IsInWatchlist ? Color.Error : Color.Default)">
+                    @r.Plate @r.TimeSec.ToString("F1")с
+                    @if (r.IsDuplicate) { <MudText Typo="Typo.caption" Color="Color.Secondary">•дубль</MudText> }
+                </MudChip>
+            }
+        </MudStack>
+        @if (_videoResults.Count > 50)
+        {
+            <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mt-2">Показано 50 из @_videoResults.Count</MudText>
+        }
+    </MudPaper>
+}
+
+@code {
+    private bool _processing;
+    private string? _imagePreviewUrl;
+    private int _videoIntervalSec = 1;
+    private bool _saveVideoToDb = true;
+    private ProcessFrameResponse? _lastResponse;
+    private readonly List<VideoPlateResult> _videoResults = new();
+    private readonly Dictionary<string, DateTime> _videoDedupCache = new();
+    private IBrowserFile? _selectedVideoFile;
+    private string _selectedVideoName = "";
+    private VideoSummary? _videoSummary;
+
+    private static string FormatFileSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        return $"{bytes / (1024.0 * 1024.0):F1} MB";
+    }
+
+    private async Task OnFileSelected(InputFileChangeEventArgs e)
+    {
+        var file = e.File;
+        if (file == null) return;
+        _selectedVideoFile = null;
+        _selectedVideoName = "";
+        _imagePreviewUrl = null;
+        _lastResponse = null;
+        _videoResults.Clear();
+        _videoSummary = null;
+        var contentType = file.ContentType.ToLowerInvariant();
+
+        if (contentType.StartsWith("image/"))
+        {
+            _processing = true;
+            StateHasChanged();
+            try
+            {
+                await using var ms = new MemoryStream();
+                await file.OpenReadStream(maxAllowedSize: 100 * 1024 * 1024).CopyToAsync(ms);
+                var base64 = Convert.ToBase64String(ms.ToArray());
+                _imagePreviewUrl = $"data:{contentType};base64,{base64}";
+                var response = await Nomeroff.ProcessFrameAsync(base64);
+                if (response != null)
+                {
+                    var watchlist = await SettingsSvc.GetWatchlistAsync();
+                    EnrichPlates(response, watchlist, _videoDedupCache, await SettingsSvc.GetDedupIntervalSecAsync());
+                    _lastResponse = response;
+                    await MaybeSaveRecords(base64, response);
+                    foreach (var p in response.Plates.Where(x => x.IsInWatchlist && !x.IsDuplicate))
+                    {
+                        _ = Nomeroff.PlayBeepAsync();
+                        Snackbar.Add($"В watchlist: {p.Plate}", Severity.Warning);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Snackbar.Add($"Ошибка: {ex.Message}", Severity.Error);
+            }
+            finally
+            {
+                _processing = false;
+                await InvokeAsync(StateHasChanged);
+            }
+            return;
+        }
+
+        if (contentType.StartsWith("video/"))
+        {
+            _selectedVideoFile = file;
+            _selectedVideoName = file.Name;
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        Snackbar.Add("Неподдерживаемый формат", Severity.Error);
+    }
+
+    private async Task ProcessVideoOnServer()
+    {
+        if (_selectedVideoFile == null) return;
+        var baseUrl = await SettingsSvc.GetRecordsApiBaseUrlAsync();
+        if (string.IsNullOrEmpty(baseUrl))
+        {
+            Snackbar.Add("Укажите URL API записей в настройках (для обработки видео)", Severity.Warning);
+            return;
+        }
+        _processing = true;
+        _videoResults.Clear();
+        _videoDedupCache.Clear();
+        _lastResponse = null;
+        _videoSummary = null;
+        StateHasChanged();
+        try
+        {
+            var interval = Math.Clamp(_videoIntervalSec, 1, 60);
+            await using var stream = _selectedVideoFile.OpenReadStream(maxAllowedSize: 1024 * 1024 * 1024);
+            var apiResponse = await Records.ProcessVideoAsync(stream, _selectedVideoFile.Name, interval);
+            if (apiResponse == null)
+            {
+                Snackbar.Add("Ошибка обработки видео на сервере. Проверьте URL API, ffmpeg и Python API.", Severity.Error);
+                return;
+            }
+            var watchlist = await SettingsSvc.GetWatchlistAsync();
+            var dedupSec = await SettingsSvc.GetDedupIntervalSecAsync();
+            foreach (var fr in apiResponse.Results)
+            {
+                foreach (var plate in fr.Plates.Where(p => !string.IsNullOrWhiteSpace(p)))
+                {
+                    var plateNorm = plate.Trim().ToUpperInvariant();
+                    var isInWatchlist = watchlist.Any(w => string.Equals(w?.Trim(), plateNorm, StringComparison.OrdinalIgnoreCase));
+                    var isDup = _videoDedupCache.TryGetValue(plateNorm, out var last) && (DateTime.UtcNow - last).TotalSeconds < dedupSec;
+                    _videoDedupCache[plateNorm] = DateTime.UtcNow;
+                    _videoResults.Add(new VideoPlateResult { Plate = plateNorm, TimeSec = fr.TimeSec, IsInWatchlist = isInWatchlist, IsDuplicate = isDup });
+                    if (isInWatchlist && !isDup)
+                    {
+                        _ = Nomeroff.PlayBeepAsync();
+                        Snackbar.Add($"В watchlist: {plateNorm} (@{fr.TimeSec:F1}с)", Severity.Warning);
+                    }
+                    if (_saveVideoToDb && !isDup)
+                    {
+                        var timeUtc = DateTime.UtcNow.AddSeconds(-fr.TimeSec).ToString("O");
+                        await Records.SaveRecordAsync(new RecordDto { TimeUtc = timeUtc, Plate = plateNorm, Source = "video_file" }, default);
+                    }
+                }
+            }
+            var framesWithPlates = apiResponse.Results.Count(r => r.Plates.Any(p => !string.IsNullOrWhiteSpace(p)));
+            var totalPlates = apiResponse.Results.Sum(r => r.Plates.Count(p => !string.IsNullOrWhiteSpace(p)));
+            var uniquePlates = _videoResults.Select(v => v.Plate).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+            _videoSummary = new VideoSummary
+            {
+                TotalFrames = apiResponse.TotalFrames,
+                IntervalSec = apiResponse.IntervalSec,
+                FramesWithPlates = framesWithPlates,
+                TotalPlates = totalPlates,
+                UniquePlates = uniquePlates
+            };
+            Snackbar.Add($"Обработано кадров: {apiResponse.TotalFrames}, найдено номеров: {_videoResults.Count}", Severity.Info);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Ошибка: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _processing = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task MaybeSaveRecords(string screenshotBase64, ProcessFrameResponse response, double? timeOffsetSec = null)
+    {
+        var timeUtc = timeOffsetSec.HasValue
+            ? DateTime.UtcNow.AddSeconds(-timeOffsetSec.Value).ToString("O")
+            : DateTime.UtcNow.ToString("O");
+        var deviceName = await SettingsSvc.GetDeviceNameAsync();
+        foreach (var p in response.Plates.Where(x => !x.IsDuplicate))
+        {
+            var saved = await Records.SaveRecordAsync(new RecordDto
+            {
+                ScreenshotBase64 = screenshotBase64,
+                Latitude = null,
+                Longitude = null,
+                TimeUtc = timeUtc,
+                Plate = p.Plate,
+                DeviceId = string.IsNullOrEmpty(deviceName) ? null : deviceName,
+                Source = timeOffsetSec.HasValue ? "video_file" : "image_file"
+            });
+            if (!saved) break;
+        }
+    }
+
+    private static void EnrichPlates(ProcessFrameResponse response, List<string> watchlist, Dictionary<string, DateTime> dedupCache, int dedupSec)
+    {
+        var set = watchlist.Select(s => s?.Trim().ToUpperInvariant()).Where(s => !string.IsNullOrEmpty(s)).ToHashSet();
+        foreach (var p in response.Plates)
+        {
+            var plate = p.Plate?.Trim().ToUpperInvariant() ?? "";
+            p.IsInWatchlist = set.Contains(plate);
+            p.IsDuplicate = dedupCache.TryGetValue(plate, out var last) && (DateTime.UtcNow - last).TotalSeconds < dedupSec;
+            dedupCache[plate] = DateTime.UtcNow;
+        }
+    }
+
+    private sealed class VideoPlateResult
+    {
+        public string Plate { get; set; } = "";
+        public double TimeSec { get; set; }
+        public bool IsInWatchlist { get; set; }
+        public bool IsDuplicate { get; set; }
+    }
+
+    private sealed class VideoSummary
+    {
+        public int TotalFrames { get; set; }
+        public int IntervalSec { get; set; }
+        public int FramesWithPlates { get; set; }
+        public int TotalPlates { get; set; }
+        public int UniquePlates { get; set; }
+    }
+}

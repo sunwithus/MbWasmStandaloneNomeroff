@@ -1,0 +1,344 @@
+@* Home.razor *@
+
+@page "/"
+@inject NomeroffService Nomeroff
+@inject SettingsService Settings
+@inject RecordsService Records
+@inject ISnackbar Snackbar
+@inject IJSRuntime JS
+@implements IAsyncDisposable
+
+<PageTitle>Распознавание номеров</PageTitle>
+
+<MudText Typo="Typo.h4" GutterBottom="true">Камера — распознавание номеров (РФ)</MudText>
+
+<MudPaper Class="pa-4 mb-4" Outlined="true">
+    <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+        <MudStack Row="true" Spacing="2">
+            <MudButton Variant="Variant.Filled"
+                       Color="@(_isRunning ? Color.Error : Color.Primary)"
+                       StartIcon="@(_isRunning ? Icons.Material.Filled.Stop : Icons.Material.Filled.PlayArrow)"
+                       OnClick="ToggleCamera">
+                @(_isRunning ? "Стоп" : "Старт")
+            </MudButton>
+            <MudButton Variant="Variant.Outlined" Color="Color.Tertiary" StartIcon="@Icons.Material.Filled.Image"
+                       Disabled="@(!_cameraStarted)" OnClick="ProcessOneFrame">
+                Один кадр
+            </MudButton>
+            <MudButton Variant="Variant.Outlined" Color="Color.Info" StartIcon="@Icons.Material.Filled.PlayCircle"
+                       Disabled="@(!_cameraStarted)" OnClick="StartCaptureLoop">
+                Непрерывный поток
+            </MudButton>
+        </MudStack>
+    </MudStack>
+</MudPaper>
+
+@if (_apiStatus != null)
+{
+    <MudAlert Severity="@(_apiStatus.ModelLoaded ? Severity.Success : Severity.Warning)" Class="mb-4" Dense="true">
+        API: @_apiStatus.Status | Модель: @(_apiStatus.ModelLoaded ? "загружена" : "нет")
+    </MudAlert>
+}
+
+<MudGrid>
+    <MudItem Size="Size.Large" SizeLg="7">
+        <MudPaper Class="pa-2" Outlined="true">
+            <MudText Typo="Typo.subtitle2" Class="mb-2">Видео с камеры</MudText>
+            <video id="@VideoElementId" autoplay playsinline muted style="max-width:100%; max-height:400px; background:#000;"></video>
+            @if (!_cameraStarted && !_isRunning)
+            {
+                <MudText Typo="Typo.body2" Color="Color.Secondary">Нажмите «Старт» для запуска камеры.</MudText>
+            }
+        </MudPaper>
+    </MudItem>
+    <MudItem Size="Size.Large" SizeLg="5">
+        <MudPaper Class="pa-4" Outlined="true">
+            <MudText Typo="Typo.subtitle2" GutterBottom="true">Последний результат</MudText>
+            @if (_lastResponse == null)
+            {
+                <MudText Typo="Typo.body2" Color="Color.Secondary">Нет данных. Запустите камеру и нажмите «Один кадр» или включите автостарт.</MudText>
+            }
+            else
+            {
+                <MudText Typo="Typo.body2">@_lastResponse.Message</MudText>
+                <MudText Typo="Typo.caption" Color="Color.Secondary">Время: @(_lastResponse.ProcessingTimeMs) мс</MudText>
+                @if (_lastResponse.Plates.Count > 0)
+                {
+                    <MudList T="PlateResult" Dense="true" Class="mt-2">
+                        @foreach (var p in _lastResponse.Plates)
+                        {
+                            <MudListItem T="PlateResult">
+                                <MudChip T="string" Size="Size.Small" Color="@(p.IsInWatchlist ? Color.Error : Color.Default)">
+                                    @p.Plate
+                                    @if (p.IsInWatchlist) { <MudIcon Icon="@Icons.Material.Filled.Warning" Size="Size.Small" Class="ms-1" /> }
+                                    @if (p.IsDuplicate) { <MudText Typo="Typo.caption" Color="Color.Secondary">(дубль)</MudText> }
+                                </MudChip>
+                            </MudListItem>
+                        }
+                    </MudList>
+                }
+            }
+        </MudPaper>
+    </MudItem>
+</MudGrid>
+
+@code {
+    private const string VideoElementId = "nomeroff-video";
+    private bool _isRunning;
+    private bool _cameraStarted;
+    private bool _autoStart;
+    private ProcessFrameResponse? _lastResponse;
+    private HealthResponse? _apiStatus;
+    private Timer? _captureTimer;
+    private int _captureIntervalMs = 1500;
+    private readonly Dictionary<string, DateTime> _dedupCache = new();
+    private int _dedupIntervalSec = 300;
+
+    /// <summary>
+    /// Инициализация компонента: загрузка настроек и проверка здоровья API.
+    /// </summary>
+    /// <returns>Task</returns>
+    protected override async Task OnInitializedAsync()
+    {
+        _autoStart = await Settings.GetAutoStartAsync();
+        _captureIntervalMs = await Settings.GetCaptureIntervalMsAsync();
+        _dedupIntervalSec = await Settings.GetDedupIntervalSecAsync();
+        
+
+        if (_autoStart)
+            await StartCamera();
+            
+        // 5. Если автостарт — запускаем периодический захват
+        if (_autoStart) StartCaptureLoop();
+    }
+
+    /// <summary>
+    /// Проверка работоспособности Python API через GET /health.
+    /// Обновляет UI-статус модели и GPU-доступности.
+    /// </summary>
+    private async Task CheckHealth()
+    {
+        _apiStatus = await Nomeroff.HealthAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ToggleCamera()
+    {
+        if (_isRunning)
+            StopCamera();
+        else
+            await StartCamera();
+    }
+
+    /// <summary>Запуск видеопотока с камеры через JS Interop.</summary>
+    private async Task StartCamera()
+    {
+        await CheckHealth();
+        
+        // 1. Получаем ID камеры из настроек (или null = дефолтная)
+        var deviceId = await Settings.GetCameraDeviceIdAsync();
+    
+        // 2. Запускаем камеру через JS: camera.startVideo(videoElementId, deviceId)
+        var result = await JS.InvokeAsync<CameraStartResult>("camera.startVideo", VideoElementId, deviceId ?? (object)false);
+    
+        // 3. Обработка ошибок доступа к камере
+        if (result?.Success != true) { /* Snackbar error */ return; }
+    
+        // 4. Обновление состояния UI
+        _cameraStarted = true;
+        _isRunning = true;
+
+    
+        Snackbar.Add("Камера запущена", Severity.Success);
+        StateHasChanged();
+    }
+
+    private void StopCamera()
+    {
+        _isRunning = false;
+        StopCaptureLoop();
+        try { _ = JS.InvokeVoidAsync("camera.stopVideo", VideoElementId); } catch { }
+        _cameraStarted = false;
+        Snackbar.Add("Камера остановлена", Severity.Info);
+        StateHasChanged();
+    }
+
+    private void StartCaptureLoop()
+    {
+        _captureTimer?.Dispose();
+        _captureTimer = new Timer(async _ => await DoCaptureAndProcess(), null, _captureIntervalMs, _captureIntervalMs);
+    }
+
+    private void StopCaptureLoop()
+    {
+        _captureTimer?.Dispose();
+        _captureTimer = null;
+    }
+
+    /// <summary>
+    /// Основной цикл обработки: захват кадра → отправка в API → результат → сохранение в БД → оповещение.
+    /// Вызывается по таймеру или вручную.
+    /// </summary>
+    /// <returns>Task</returns>
+    private async Task DoCaptureAndProcess()
+    {
+        // Guard clauses: проверка состояния
+        if (!_isRunning || !_cameraStarted) return;
+    
+        try
+        {
+            // 1. Захват кадра: video → canvas → base64 (макс. ширина 1280px)
+            var base64 = await JS.InvokeAsync<string>("camera.captureFrame", VideoElementId, 1280);
+            if (string.IsNullOrEmpty(base64)) return;
+        
+            // 2. Отправка в Python API: POST /api/process_frame
+            var response = await Nomeroff.ProcessFrameAsync(base64);
+            if (response == null) return;
+        
+            // 3. Обогащение: watchlist match + deduplication
+            var watchlist = await Settings.GetWatchlistAsync();
+            EnrichPlates(response, watchlist, _dedupCache, _dedupIntervalSec);
+        
+            // 4. Сохранение в локальную БД (скриншот + GPS + время + номер)
+            await MaybeSaveRecords(base64, response);
+        
+            // 5. Обновление UI и оповещения
+            await InvokeAsync(() =>
+            {
+                _lastResponse = response;  // Отображение последнего результата
+            
+                // Звуковой сигнал + Snackbar для совпадений с watchlist (не дубли)
+                foreach (var p in response.Plates.Where(x => x.IsInWatchlist && !x.IsDuplicate))
+                {
+                    _ = Nomeroff.PlayBeepAsync();  // Воспроизведение alert.wav
+                    Snackbar.Add($"В watchlist: {p.Plate}", Severity.Warning);
+                }
+                StateHasChanged();
+            });
+        }
+        catch (Exception)
+        {
+            // Тихое подавление ошибок в фоновом цикле (логирование можно добавить)
+        }
+    }
+
+    private async Task ProcessOneFrame()
+    {
+        if (!_cameraStarted) { Snackbar.Add("Сначала запустите камеру", Severity.Warning); return; }
+        var base64 = await JS.InvokeAsync<string>("camera.captureFrame", VideoElementId, 1280);
+        if (string.IsNullOrEmpty(base64)) { Snackbar.Add("Не удалось захватить кадр", Severity.Error); return; }
+        var response = await Nomeroff.ProcessFrameAsync(base64);
+        if (response == null)
+        {
+            Snackbar.Add("Ошибка запроса к API. Проверьте настройки и что сервер запущен.", Severity.Error);
+            return;
+        }
+        var watchlist = await Settings.GetWatchlistAsync();
+        EnrichPlates(response, watchlist, _dedupCache, _dedupIntervalSec);
+        await MaybeSaveRecords(base64, response);
+        _lastResponse = response;
+        foreach (var p in response.Plates.Where(x => x.IsInWatchlist && !x.IsDuplicate))
+        {
+            await Nomeroff.PlayBeepAsync();
+            Snackbar.Add($"Совпадение с watchlist: {p.Plate}", Severity.Warning);
+        }
+        StateHasChanged();
+    }
+
+    /// <summary>
+    /// Сохранение распознанных номеров в локальную БД.
+    /// Пропускает дубликаты (по флагу IsDuplicate).
+    /// </summary>
+    /// <param name="screenshotBase64">Base64-скриншот кадра</param>
+    /// <param name="response">Ответ от API с распознанными номерами</param>
+    private async Task MaybeSaveRecords(string screenshotBase64, ProcessFrameResponse response)
+    {
+        // 1. Получение GPS-координат (неблокирующее, с обработкой ошибок)
+        double? lat = null, lon = null;
+        try
+        {
+            var pos = await JS.InvokeAsync<GpsPos>("gps.getCurrentPosition");
+            if (pos != null) { lat = pos.Latitude; lon = pos.Longitude; }
+        }
+        catch { /* GPS опционален */ }
+    
+        // 2. Формирование timestamp в ISO 8601
+        var timeUtc = DateTime.UtcNow.ToString("O");
+    
+        // 3. Сохранение каждого уникального номера
+        var deviceName = await Settings.GetDeviceNameAsync();
+        foreach (var p in response.Plates.Where(x => !x.IsDuplicate))
+        {
+            var saved = await Records.SaveRecordAsync(new RecordDto
+            {
+                ScreenshotBase64 = screenshotBase64,
+                Latitude = lat,
+                Longitude = lon,
+                TimeUtc = timeUtc,
+                Plate = p.Plate,
+                DeviceId = string.IsNullOrEmpty(deviceName) ? null : deviceName,
+                Source = "camera"
+            });
+            if (!saved) break;  // Прерывание при ошибке БД
+        }
+    }
+
+    /// <summary>
+    /// Обогащение результатов API: добавление флагов IsInWatchlist и IsDuplicate.
+    /// Модифицирует объекты PlateResult "на месте" (side effect).
+    /// </summary>
+    /// <param name="response">Ответ от Python API</param>
+    /// <param name="watchlist">Список отслеживаемых номеров (из настроек)</param>
+    /// <param name="dedupCache">Словарь last_seen: plate → DateTime (для дедупликации)</param>
+    /// <param name="dedupSec">Интервал дедупликации в секундах (напр., 300 = 5 мин)</param>
+    private static void EnrichPlates(
+        ProcessFrameResponse response,
+        List<string> watchlist,
+        Dictionary<string, DateTime> dedupCache,
+        int dedupSec)
+    {
+        // Нормализация watchlist: upper-case, trim, удаление пустых
+        var set = watchlist
+            .Select(s => s?.Trim().ToUpperInvariant())
+            .Where(s => !string.IsNullOrEmpty(s))
+            .ToHashSet();
+    
+        foreach (var p in response.Plates)
+        {
+            var plate = p.Plate?.Trim().ToUpperInvariant() ?? "";
+        
+            // Флаг: номер в списке отслеживаемых
+            p.IsInWatchlist = set.Contains(plate);
+        
+            // Флаг: дубликат (был обработан менее dedupSec секунд назад)
+            p.IsDuplicate = dedupCache.TryGetValue(plate, out var last)
+                && (DateTime.UtcNow - last).TotalSeconds < dedupSec;
+        
+            // Обновление времени последнего появления (для следующего цикла)
+            dedupCache[plate] = DateTime.UtcNow;
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        StopCaptureLoop();
+        if (_cameraStarted)
+            try { await JS.InvokeVoidAsync("camera.stopVideo", VideoElementId); } catch { }
+    }
+
+    private sealed class CameraStartResult
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("success")]
+        public bool Success { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("error")]
+        public string? Error { get; set; }
+    }
+
+    private sealed class GpsPos
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("latitude")]
+        public double Latitude { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("longitude")]
+        public double Longitude { get; set; }
+    }
+}
