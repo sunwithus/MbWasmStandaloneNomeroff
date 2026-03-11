@@ -8,6 +8,9 @@ var builder = WebAssemblyHostBuilder.CreateDefault(args);
 builder.Logging.SetMinimumLevel(LogLevel.Debug);
 builder.Logging.AddFilter("Microsoft", LogLevel.Warning);
 builder.Logging.AddFilter("MbWasmStandaloneNomeroff", LogLevel.Debug);
+var logBuffer = new LogBufferService();
+builder.Services.AddSingleton(logBuffer);
+builder.Logging.AddProvider(new FileLoggerProvider(logBuffer));
 builder.RootComponents.Add<App>("#app");
 builder.RootComponents.Add<HeadOutlet>("head::after");
 

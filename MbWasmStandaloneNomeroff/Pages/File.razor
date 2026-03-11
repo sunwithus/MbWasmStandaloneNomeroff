@@ -5,6 +5,7 @@
 @inject NomeroffService Nomeroff
 @inject SettingsService SettingsSvc
 @inject ISnackbar Snackbar
+@inject ILogger<File> Logger
 
 <PageTitle>Файл — изображение или видео</PageTitle>
 
@@ -108,7 +109,7 @@
     private bool _processing;
     private string? _imagePreviewUrl;
     private int _videoIntervalSec = 1;
-    private bool _saveVideoToDb = true;
+    private bool _saveVideoToDb = false;
     private ProcessFrameResponse? _lastResponse;
     private readonly List<VideoPlateResult> _videoResults = new();
     private readonly Dictionary<string, DateTime> _videoDedupCache = new();
@@ -204,9 +205,13 @@
             var apiResponse = await Records.ProcessVideoAsync(stream, _selectedVideoFile.Name, interval);
             if (apiResponse == null)
             {
+                Logger.LogWarning("ProcessVideoOnServer: apiResponse=null");
                 Snackbar.Add("Ошибка обработки видео. Запущен ли Nomeroff.Video.Api? Установлен ли ffmpeg в PATH?", Severity.Error);
                 return;
             }
+            Logger.LogInformation("ProcessVideoOnServer: получено кадров={Count}, первый кадр ImageBase64={HasImg}",
+                apiResponse.Results.Count,
+                apiResponse.Results.FirstOrDefault()?.ImageBase64 != null ? (apiResponse.Results[0].ImageBase64?.Length ?? 0) + " bytes" : "null");
             var watchlist = await SettingsSvc.GetWatchlistAsync();
             var dedupSec = await SettingsSvc.GetDedupIntervalSecAsync();
             foreach (var fr in apiResponse.Results)
@@ -223,12 +228,25 @@
                         _ = Nomeroff.PlayBeepAsync();
                         Snackbar.Add($"В watchlist: {plateNorm} (@{fr.TimeSec:F1}с)", Severity.Warning);
                     }
-                    var skipWithoutGps = await SettingsSvc.GetSkipSaveWithoutGpsAsync();
-                    if (_saveVideoToDb && !isDup && !skipWithoutGps)
+                    // Для видео: сохраняем независимо от skipWithoutGps — API сам возьмёт GPS, если настроен
+                    if (_saveVideoToDb && !isDup)
                     {
                         var timeUtc = DateTime.UtcNow.AddSeconds(-fr.TimeSec).ToString("O");
                         var dbName = await Records.GetOrCreateCurrentDbAsync();
-                        await Records.SaveRecordAsync(new RecordDto { TimeUtc = timeUtc, CarNumber = plateNorm, Source = "video_file", Db = dbName }, default);
+                        var deviceName = await SettingsSvc.GetDeviceNameAsync();
+                        var dto = new RecordDto
+                        {
+                            ScreenshotBase64 = fr.ImageBase64,
+                            TimeUtc = timeUtc,
+                            CarNumber = plateNorm,
+                            DeviceId = string.IsNullOrEmpty(deviceName) ? null : deviceName,
+                            Source = "video_file",
+                            Db = dbName
+                        };
+                        Logger.LogInformation("Video save: plate={Plate}, db={Db}, screenshotLen={Len}",
+                            plateNorm, dbName, dto.ScreenshotBase64?.Length ?? 0);
+                        var saved = await Records.SaveRecordAsync(dto, default);
+                        Logger.LogInformation("Video save result: plate={Plate}, saved={Saved}", plateNorm, saved);
                     }
                 }
             }

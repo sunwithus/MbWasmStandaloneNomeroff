@@ -1,4 +1,7 @@
 @inherits LayoutComponentBase
+@inject SettingsService Settings
+@inject RecognitionStateService RecState
+@inject NavigationManager Nav
 
 <MudThemeProvider Theme="@_theme" IsDarkMode="_isDarkMode" />
 <MudPopoverProvider />
@@ -28,6 +31,8 @@
     private bool _isDarkMode = true;
     private MudTheme? _theme;
 
+    private static bool _autoStartAlreadyTriggered;
+
     protected override void OnInitialized()
     {
         base.OnInitialized();
@@ -38,6 +43,23 @@
             PaletteDark = _darkPalette,
             LayoutProperties = new LayoutProperties()
         };
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_autoStartAlreadyTriggered)
+        {
+            _autoStartAlreadyTriggered = true;
+            try
+            {
+                if (await Settings.GetAutoStartAsync())
+                {
+                    await RecState.RequestStartAsync();
+                    Nav.NavigateTo("/", forceLoad: false);
+                }
+            }
+            catch { /* не мешать загрузке при ошибке */ }
+        }
     }
 
     private void DrawerToggle()

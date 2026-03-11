@@ -81,7 +81,6 @@
     private const string VideoElementId = "nomeroff-video";
     private bool _isRunning;
     private bool _cameraStarted;
-    private bool _autoStart;
     private ProcessFrameResponse? _lastResponse;
     private HealthResponse? _apiStatus;
     private Timer? _captureTimer;
@@ -99,17 +98,10 @@
         if (!firstRender) return;
         Logger.LogInformation("Home: OnAfterRenderAsync firstRender, loading settings");
         Settings.InvalidateCache();
-        _autoStart = await Settings.GetAutoStartAsync();
         _captureIntervalMs = await Settings.GetCaptureIntervalMsAsync();
         _dedupIntervalSec = await Settings.GetDedupIntervalSecAsync();
-        Logger.LogInformation("Home: AutoStart={AutoStart}, CaptureIntervalMs={Ms}, DedupSec={Sec}", _autoStart, _captureIntervalMs, _dedupIntervalSec);
-
-        if (_autoStart)
-        {
-            Logger.LogInformation("Home: AutoStart enabled, calling RequestStartAsync");
-            await RecState.RequestStartAsync();
-            StateHasChanged();
-        }
+        Logger.LogInformation("Home: CaptureIntervalMs={Ms}, DedupSec={Sec}", _captureIntervalMs, _dedupIntervalSec);
+        StateHasChanged();
     }
 
     /// <summary>

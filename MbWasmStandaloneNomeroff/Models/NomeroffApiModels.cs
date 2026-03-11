@@ -68,6 +68,9 @@ public class ProcessVideoFrameResult
     public double TimeSec { get; set; }
     [JsonPropertyName("plates")]
     public List<string> Plates { get; set; } = new();
+    /// <summary>Base64 кадра для сохранения в БД (скриншот при распознавании).</summary>
+    [JsonPropertyName("imageBase64")]
+    public string? ImageBase64 { get; set; }
 }
 
 /// <summary>Ответ POST /api/process-video (Records API: ffmpeg + Python)</summary>

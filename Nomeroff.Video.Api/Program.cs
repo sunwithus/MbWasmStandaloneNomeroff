@@ -149,7 +149,7 @@ app.MapPost("/api/process-video", async (IFormFile? file, int intervalSec, IConf
                     }
                 }
             }
-            results.Add(new { timeSec, plates });
+            results.Add(new { timeSec, plates, imageBase64 = base64 });
             logger.LogDebug("process-video: frame {Index} @ {TimeSec}s, plates={Plates}", frameIndex, timeSec, plates.Count);
             frameIndex++;
         }

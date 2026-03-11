@@ -1,6 +1,7 @@
 @page "/settings"
 @inject SettingsService SettingsSvc
 @inject RecordsService RecordsSvc
+@inject LogBufferService LogBuffer
 @inject ISnackbar Snackbar
 @inject IJSRuntime JS
 
@@ -92,9 +93,12 @@
     {
         <MudAlert Severity="@(_gpsTestSuccess ? Severity.Success : Severity.Warning)" Dense="true" Class="mb-4">@_gpsTestMessage</MudAlert>
     }
-    <MudButton Variant="Variant.Filled" Color="Color.Primary" Class="mt-4" OnClick="Save">
-        Сохранить
-    </MudButton>
+    <MudStack Row="true" Spacing="2" Class="mt-4">
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="Save">Сохранить</MudButton>
+        <MudButton Variant="Variant.Outlined" Color="Color.Secondary" StartIcon="@Icons.Material.Filled.Download" OnClick="DownloadLogs">
+            Скачать логи
+        </MudButton>
+    </MudStack>
 </MudPaper>
 
 @code {
@@ -230,6 +234,14 @@
         StateHasChanged();
     }
     */
+    private async Task DownloadLogs()
+    {
+        var text = LogBuffer.GetLogsAsText();
+        var filename = $"nomeroff-logs-{DateTime.Now:yyyy-MM-dd_HH-mm}.txt";
+        await JS.InvokeVoidAsync("downloadLogsFile", text, filename);
+        Snackbar.Add("Логи скачаны", Severity.Info);
+    }
+
     private async Task Save()
     {
         await SettingsSvc.SetDeviceNameAsync(_deviceName);

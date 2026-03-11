@@ -176,19 +176,42 @@ public class RecordsService
     public async Task<bool> SaveRecordAsync(RecordDto record, CancellationToken ct = default)
     {
         var baseUrl = await _settings.GetRecordsApiBaseUrlAsync();
-        if (string.IsNullOrEmpty(baseUrl)) return false;
+        if (string.IsNullOrEmpty(baseUrl))
+        {
+            _logger?.LogWarning("SaveRecordAsync: baseUrl пуст, API записей не настроен");
+            return false;
+        }
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/api/records");
+            var url = $"{baseUrl}/api/records";
+            _logger?.LogInformation("SaveRecordAsync: POST {Url}, carNumber={Car}, db={Db}, " +
+                "screenshotBase64 is {ScreenshotStatus} (len={Len}), lat={Lat}, lon={Lon}, deviceId={DeviceId}, source={Source}",
+                url, record.CarNumber, record.Db,
+                string.IsNullOrEmpty(record.ScreenshotBase64) ? "NULL/EMPTY" : "PRESENT",
+                record.ScreenshotBase64?.Length ?? 0,
+                record.Latitude, record.Longitude, record.DeviceId, record.Source);
+            using var req = new HttpRequestMessage(HttpMethod.Post, url);
             req.Content = JsonContent.Create(record);
             var gpsUrl = await _settings.GetGpsApiBaseUrlAsync();
             if (!string.IsNullOrEmpty(gpsUrl))
                 req.Headers.TryAddWithoutValidation("X-Gps-Api-Base-Url", gpsUrl);
             var response = await _http.SendAsync(req, ct);
-            return response.IsSuccessStatusCode;
+            var ok = response.IsSuccessStatusCode;
+            if (!ok)
+            {
+                var body = await response.Content.ReadAsStringAsync(ct);
+                _logger?.LogWarning("SaveRecordAsync: HTTP {Status}, body={Body}", response.StatusCode, body.Length > 200 ? body[..200] + "..." : body);
+            }
+            else
+            {
+                var respBody = await response.Content.ReadAsStringAsync(ct);
+                _logger?.LogInformation("SaveRecordAsync: OK, carNumber={Car}, response={Resp}", record.CarNumber, respBody);
+            }
+            return ok;
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "SaveRecordAsync: ошибка carNumber={Car}", record.CarNumber);
             return false;
         }
     }

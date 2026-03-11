@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Nomeroff.Interbase.Api.Interbase;
@@ -42,18 +43,40 @@ app.UseSwaggerUI(c =>
 });
 
 // --- API для MbWasmStandaloneNomeroff ---
-app.MapPost("/api/records", async (HttpContext ctx, [FromBody] RecordRequest req, IConfiguration config, NomeroffInterbaseService ibService, DbManager dbManager) =>
+app.MapPost("/api/records", async (HttpContext ctx, [FromBody] RecordRequest req, IConfiguration config, NomeroffInterbaseService ibService, DbManager dbManager, ILoggerFactory loggerFactory) =>
 {
+    var logger = loggerFactory.CreateLogger("NomeroffInterbase");
+    logger.LogInformation("/api/records: Db={Db}, CarNumber={CarNumber}, DeviceId={DeviceId}, Source={Source}, " +
+        "ScreenshotBase64 is {ScreenshotStatus} (len={ScreenshotLen}), Lat={Lat}, Lon={Lon}",
+        req.Db, req.CarNumber, req.DeviceId, req.Source,
+        string.IsNullOrEmpty(req.ScreenshotBase64) ? "NULL/EMPTY" : "PRESENT",
+        req.ScreenshotBase64?.Length ?? 0,
+        req.Latitude, req.Longitude);
+
     var connStr = GetConnectionString(req.Db, dbManager, config);
-    var service = new NomeroffInterbaseService(connStr);
+    var service = new NomeroffInterbaseService(connStr, logger);
     if (!service.IsConfigured)
+    {
+        logger.LogWarning("/api/records: БД не настроена, connStr пуст");
         return Results.Problem("Укажите БД или Interbase:ConnectionString в appsettings.json.");
+    }
 
     byte[]? screenshotBlob = null;
     if (!string.IsNullOrEmpty(req.ScreenshotBase64))
     {
-        try { screenshotBlob = Convert.FromBase64String(req.ScreenshotBase64); }
-        catch { }
+        try
+        {
+            screenshotBlob = Convert.FromBase64String(req.ScreenshotBase64);
+            logger.LogInformation("/api/records: Base64 декодирован, размер изображения = {Size} байт", screenshotBlob.Length);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "/api/records: Ошибка декодирования Base64");
+        }
+    }
+    else
+    {
+        logger.LogWarning("/api/records: ScreenshotBase64 пуст — изображение НЕ будет записано!");
     }
 
     var lat = req.Latitude;
@@ -72,13 +95,20 @@ app.MapPost("/api/records", async (HttpContext ctx, [FromBody] RecordRequest req
                     lat = latProp.GetDouble();
                     lon = lonProp.GetDouble();
                 }
+                logger.LogInformation("/api/records: GPS получен из X-Gps-Api-Base-Url: lat={Lat}, lon={Lon}", lat, lon);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "/api/records: Не удалось получить GPS из {Url}", gpsUrl);
+            }
         }
     }
 
     var deviceId = req.DeviceId ?? config["Interbase:DefaultDeviceId"] ?? Environment.MachineName;
+    logger.LogInformation("/api/records: вызов SaveRecordAsync: deviceId={DeviceId}, carNumber={CarNumber}, lat={Lat}, lon={Lon}, imageSize={Size}",
+        deviceId, req.CarNumber, lat, lon, screenshotBlob?.Length ?? 0);
     var id = await service.SaveRecordAsync(deviceId, req.CarNumber ?? "", lat, lon, screenshotBlob);
+    logger.LogInformation("/api/records: запись сохранена, id={Id}", id);
     return Results.Ok(new { id });
 });
 
@@ -211,10 +241,10 @@ app.MapGet("/api/db/image/{id:long}", async (long id, string? db, NomeroffInterb
 app.MapGet("/", () =>
 {
     var html = new StringBuilder();
-    html.AppendLine("<html><head><meta charset='utf-8'><title>Nomeroff Interbase API</title></head><body>");
+    html.AppendLine("<html><head><meta charset='utf-8'><title>Nomeroff Interbase API</title></head><body style='color: #ccc; background-color: rgba(26, 26, 39, 1);'>");
     html.AppendLine("<h2>Nomeroff.Interbase.Api</h2><ul>");
-    html.AppendLine("<li><a href='/db'>Просмотрщик БД</a></li>");
-    html.AppendLine("<li><a href='/swagger'>Swagger</a></li>");
+    html.AppendLine("<li><a href='/db' style='color: lightblue;'>Просмотрщик БД</a></li>");
+    html.AppendLine("<li><a href='/swagger' style='color: lightblue;'>Swagger</a></li>");
     html.AppendLine("</ul></body></html>");
     return Results.Content(html.ToString(), "text/html; charset=utf-8");
 });
@@ -230,13 +260,28 @@ app.Run();
 
 public class RecordRequest
 {
+    [JsonPropertyName("db")]
     public string? Db { get; set; }
+    [JsonPropertyName("screenshot_base64")]
     public string? ScreenshotBase64 { get; set; }
+    [JsonPropertyName("latitude")]
     public double? Latitude { get; set; }
+    [JsonPropertyName("longitude")]
     public double? Longitude { get; set; }
+    [JsonPropertyName("time_utc")]
     public string? TimeUtc { get; set; }
+    [JsonPropertyName("carNumber")]
     public string? CarNumber { get; set; }
+    [JsonPropertyName("device_id")]
     public string? DeviceId { get; set; }
+    [JsonPropertyName("source")]
+    public string? Source { get; set; }
+    [JsonPropertyName("reserved1")]
+    public string? Reserved1 { get; set; }
+    [JsonPropertyName("reserved2")]
+    public string? Reserved2 { get; set; }
+    [JsonPropertyName("reserved3")]
+    public string? Reserved3 { get; set; }
 }
 
 public class CreateDbRequest
