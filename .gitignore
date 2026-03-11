@@ -10,6 +10,7 @@
 *.userosscache
 *.sln.docstates
 .DS_Store
+*.ibs
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
@@ -366,3 +367,4 @@ MigrationBackup/
 **/pattern.docx
 **/ffprobe.exe
 **/ffmpeg.exe
+**/*.ibs
