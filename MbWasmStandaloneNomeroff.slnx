@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="MbWasmStandaloneNomeroff/MbWasmStandaloneNomeroff.csproj" />
+  <Project Path="MbWebApp/MbWebApp.csproj" Id="11536e98-db9a-4907-a0a6-b790cdc8e25b" />
   <Project Path="Nomeroff.Gps.Api/Nomeroff.Gps.Api.csproj" />
   <Project Path="Nomeroff.Interbase.Api/Nomeroff.Interbase.Api.csproj" />
   <Project Path="Nomeroff.Video.Api/Nomeroff.Video.Api.csproj" />

@@ -1,0 +1,74 @@
+@inject RecognitionStateService State
+@inject NavigationManager Nav
+@implements IDisposable
+
+<div class="recognition-panel" style="z-index:9999;">
+    <MudPaper Class="pa-3" Outlined="true" Elevation="2">
+        <MudStack Spacing="2">
+            <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
+                <MudButton Variant="Variant.Filled"
+                           Color="@(State.IsRunning ? Color.Error : Color.Success)"
+                           StartIcon="@(State.IsRunning ? Icons.Material.Filled.Stop : Icons.Material.Filled.PlayArrow)"
+                           Size="Size.Small"
+                           OnClick="ToggleRunning">
+                    @(State.IsRunning ? "Стоп" : "Старт")
+                </MudButton>
+                <MudChip T="string" Size="Size.Small" Color="@(State.IsRunning ? Color.Success : Color.Default)" Variant="Variant.Text">
+                    @(State.IsRunning ? "Работает" : "Остановлено")
+                </MudChip>
+            </MudStack>
+            <MudStack Spacing="1">
+                <MudText Typo="Typo.caption">Камера: @State.CameraStatus</MudText>
+                <MudText Typo="Typo.caption">GPS: @State.GpsStatus</MudText>
+                <MudText Typo="Typo.caption">API: @State.ApiStatus</MudText>
+                <MudText Typo="Typo.caption">БД: @State.DbStatus</MudText>
+                @if (!string.IsNullOrEmpty(State.LastError))
+                {
+                    <MudAlert Severity="Severity.Error" Dense="true" Class="mt-1 py-1">@State.LastError</MudAlert>
+                }
+            </MudStack>
+        </MudStack>
+    </MudPaper>
+</div>
+
+<style>
+    .recognition-panel {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 1000;
+        max-width: 280px;
+    }
+</style>
+
+@code {
+    private void HandleStateChanged()
+    {
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    protected override void OnInitialized()
+    {
+        State.OnStateChanged += HandleStateChanged;
+    }
+
+    private async Task ToggleRunning()
+    {
+        if (State.IsRunning)
+        {
+            State.RequestStop();
+        }
+        else
+        {
+            await State.RequestStartAsync();
+            var path = new Uri(Nav.Uri).AbsolutePath.TrimStart('/').Split('?')[0];
+            if (!string.IsNullOrEmpty(path) && path != "index.html")
+                Nav.NavigateTo("/", forceLoad: false);
+        }
+    }
+
+    public void Dispose()
+    {
+        State.OnStateChanged -= HandleStateChanged;
+    }
+}

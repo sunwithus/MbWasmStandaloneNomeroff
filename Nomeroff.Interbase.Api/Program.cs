@@ -188,7 +188,7 @@ app.MapPost("/api/db/test-write", async (string? db, bool? withImage, NomeroffIn
                 testImage = Convert.FromBase64String("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBEQACEQD/ALH/2Q==");
             }
         }
-        var id = await service.SaveRecordAsync("TEST_DEVICE", "A123BV777", 55.7558, 37.6173, testImage);
+        var id = await service.SaveRecordAsync("TEST_DEVICE", "А123БГ125", 55.7558, 37.6173, testImage);
         return Results.Ok(new { success = true, id });
     }
     catch (Exception ex)

@@ -8,7 +8,9 @@ public class DbManager
 {
     private readonly string _dbFolder;
     private readonly string _archivePath;
-    private const string DefaultConnectionTemplate = "User=SYSDBA;Password=masterkey;Database={0};DataSource=localhost;Port=3050;Dialect=3;Charset=NONE;Role=;Connection lifetime=15;Pooling=true;MinPoolSize=0;MaxPoolSize=50;Packet Size=8192;ServerType=0";
+    //private const string DefaultConnectionTemplate = "User=SYSDBA;Password=masterkey;Database={0};DataSource=localhost;Port=3050;Dialect=3;Charset=NONE;Role=;Connection lifetime=15;Pooling=true;MinPoolSize=0;MaxPoolSize=50;Packet Size=8192;ServerType=0";
+
+    private const string DefaultConnectionTemplate = "User=SYSDBA;Password=masterkey;Database={0};DataSource=localhost;Port=3050;Dialect=3;Charset=WIN1251;Role=;Connection lifetime=15;Pooling=true;MinPoolSize=0;MaxPoolSize=50;Packet Size=8192;ServerType=0";
 
     public DbManager(string? dbFolder, string? archivePath)
     {

@@ -1,0 +1,146 @@
+@page "/watchlist"
+@inject SettingsService SettingsSvc
+@inject ISnackbar Snackbar
+@inject IJSRuntime JS
+
+<PageTitle>Watchlist</PageTitle>
+
+<MudText Typo="Typo.h4" GutterBottom="true">Список наблюдения</MudText>
+<MudText Typo="Typo.body2" Class="mb-4">Хранится в браузере (localStorage). При распознавании совпадения вызывают звук и уведомление.</MudText>
+
+<MudPaper Class="pa-4" Outlined="true">
+    <MudStack Row="true" Spacing="2" Class="mb-4" AlignItems="AlignItems.Center">
+        <MudTextField @bind-Value="_newPlate" Label="Новый номер" Variant="Variant.Outlined" Placeholder="А123БВ777"
+                     Style="max-width: 200px;" OnKeyDown="OnNewPlateKeyDown" />
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="AddPlate" StartIcon="@Icons.Material.Filled.Add">
+            Добавить
+        </MudButton>
+        <MudButton Variant="Variant.Outlined" Color="Color.Secondary" OnClick="SaveToFile" StartIcon="@Icons.Material.Filled.Save">
+            Сохранить в файл
+        </MudButton>
+        <MudButton Variant="Variant.Outlined" Color="Color.Secondary" OnClick="TriggerLoadFile" StartIcon="@Icons.Material.Filled.Upload">
+            Загрузить из файла
+        </MudButton>
+        <InputFile id="watchlistFileInput" style="display:none" accept=".txt,.json" OnChange="LoadFromFile" />
+    </MudStack>
+
+    @if (_items.Count == 0)
+    {
+        <MudText Typo="Typo.body2" Color="Color.Secondary">Список пуст. Добавьте номера выше.</MudText>
+    }
+    else
+    {
+        <MudList T="string" Dense="true">
+            @foreach (var item in _items.OrderBy(x => x))
+            {
+                <MudListItem T="string">
+                    <MudChip T="string" Size="Size.Medium" OnClose="() => RemovePlate(item)">@item</MudChip>
+                </MudListItem>
+            }
+        </MudList>
+    }
+</MudPaper>
+
+@code {
+    private List<string> _items = new();
+    private string _newPlate = "";
+
+    private async Task TriggerLoadFile()
+    {
+        await JS.InvokeVoidAsync("watchlist.clickFileInput", "watchlistFileInput");
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        _items = await SettingsSvc.GetWatchlistAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task AddPlate()
+    {
+        var plate = Normalize(_newPlate);
+        if (string.IsNullOrEmpty(plate)) return;
+        if (_items.Contains(plate)) { Snackbar.Add("Уже в списке", Severity.Info); return; }
+        _items.Add(plate);
+        _newPlate = "";
+        await SettingsSvc.SetWatchlistAsync(_items);
+        Snackbar.Add($"Добавлено: {plate}", Severity.Success);
+    }
+
+    private async Task RemovePlate(string plate)
+    {
+        _items.Remove(plate);
+        await SettingsSvc.SetWatchlistAsync(_items);
+        Snackbar.Add($"Удалено: {plate}", Severity.Info);
+    }
+
+    private async Task OnNewPlateKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await AddPlate();
+    }
+
+    private static string Normalize(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "";
+        return new string(s.Where(c => char.IsLetterOrDigit(c)).ToArray()).ToUpperInvariant();
+    }
+
+    private async Task SaveToFile()
+    {
+        var content = string.Join(Environment.NewLine, _items.OrderBy(x => x));
+        if (string.IsNullOrEmpty(content))
+        {
+            Snackbar.Add("Список пуст", Severity.Info);
+            return;
+        }
+        await JS.InvokeVoidAsync("watchlist.downloadAsFile", content, "watchlist.txt");
+        Snackbar.Add("Сохранено в watchlist.txt", Severity.Success);
+    }
+
+    private async Task LoadFromFile(InputFileChangeEventArgs e)
+    {
+        var file = e.File;
+        if (file == null || file.Size == 0) return;
+        try
+        {
+            await using var stream = file.OpenReadStream(maxAllowedSize: 1024 * 1024);
+            using var reader = new StreamReader(stream);
+            var text = await reader.ReadToEndAsync();
+            var loaded = ParseWatchlistFile(text);
+            if (loaded.Count == 0)
+            {
+                Snackbar.Add("В файле не найдено номеров", Severity.Warning);
+                return;
+            }
+            foreach (var p in loaded)
+                if (!string.IsNullOrEmpty(p) && !_items.Contains(p))
+                    _items.Add(p);
+            await SettingsSvc.SetWatchlistAsync(_items);
+            Snackbar.Add($"Загружено {loaded.Count} номеров", Severity.Success);
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Ошибка: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private static List<string> ParseWatchlistFile(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return new List<string>();
+        var trimmed = text.Trim();
+        if (trimmed.StartsWith("["))
+        {
+            try
+            {
+                var json = System.Text.Json.JsonSerializer.Deserialize<string[]>(trimmed);
+                if (json != null)
+                    return json.Select(Normalize).Where(x => !string.IsNullOrEmpty(x)).Distinct().ToList();
+            }
+            catch { }
+        }
+        var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        return lines.Select(l => Normalize(l.Trim())).Where(x => !string.IsNullOrEmpty(x)).Distinct().ToList();
+    }
+}
