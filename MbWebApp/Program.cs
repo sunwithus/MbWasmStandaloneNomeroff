@@ -26,6 +26,14 @@ builder.Services.AddSignalR(o =>
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
+
+// === Настройка URL (до Build!) ===
+var urls = builder.Configuration["Urls"]
+           ?? builder.Configuration["Kestrel:Endpoints:Http:Url"]
+           ?? "http://0.0.0.0:5555";
+builder.WebHost.UseUrls(urls);
+
+
 var app = builder.Build();
 
 if (!app.Environment.IsDevelopment())

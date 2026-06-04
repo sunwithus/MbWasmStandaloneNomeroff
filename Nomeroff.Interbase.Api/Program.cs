@@ -8,6 +8,9 @@ Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
 var builder = WebApplication.CreateBuilder(args);
 
+var listenUrl = builder.Configuration["Urls"] ?? "http://0.0.0.0:5552";
+builder.WebHost.UseUrls(listenUrl);
+
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
@@ -21,9 +24,11 @@ builder.Services.AddCors(options =>
     });
 });
 
-var root = builder.Environment.ContentRootPath;
-var dbFolder = Path.Combine(root, builder.Configuration["Interbase:DbFolder"] ?? "Examples");
+// Папка publish/exe, а не текущий каталог запуска (start-app.bat и т.п.)
+var root = AppContext.BaseDirectory;
+var dbFolder = Path.GetFullPath(Path.Combine(root, builder.Configuration["Interbase:DbFolder"] ?? "Examples"));
 var archivePath = Path.GetFullPath(Path.Combine(root, builder.Configuration["Interbase:ArchivePath"] ?? "empty38.zip"));
+Directory.CreateDirectory(dbFolder);
 builder.Services.AddSingleton(new DbManager(dbFolder, archivePath));
 
 var defaultConnStr = builder.Configuration["Interbase:ConnectionString"] ?? "";
@@ -34,6 +39,7 @@ builder.Services.AddSingleton(sp =>
 });
 
 var app = builder.Build();
+app.Logger.LogInformation("Interbase DbFolder: {DbFolder}, Archive: {Archive}", dbFolder, archivePath);
 
 app.UseCors();
 app.UseSwagger();

@@ -62,6 +62,12 @@ public class ProcessVideoFrameResult
     public List<string> Plates { get; set; } = new();
     [JsonPropertyName("imageBase64")]
     public string? ImageBase64 { get; set; }
+    [JsonPropertyName("latitude")]
+    public double? Latitude { get; set; }
+    [JsonPropertyName("longitude")]
+    public double? Longitude { get; set; }
+    [JsonPropertyName("overlayTimeUtc")]
+    public string? OverlayTimeUtc { get; set; }
 }
 
 public class ProcessVideoResponse

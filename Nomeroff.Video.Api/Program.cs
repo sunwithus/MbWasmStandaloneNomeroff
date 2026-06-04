@@ -1,8 +1,11 @@
 using Microsoft.AspNetCore.Http.Features;
+using Nomeroff.Video.Api;
 using System.Reflection;
 using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.Configure<GpsOcrOptions>(builder.Configuration.GetSection(GpsOcrOptions.SectionName));
+builder.Services.AddSingleton<GpsOverlayOcr>();
 var listenAddress = builder.Configuration["ListenAddress"] ?? "0.0.0.0";
 var port = builder.Configuration.GetValue<int>("Port", 5553);
 builder.WebHost.UseUrls($"http://{listenAddress}:{port}");
@@ -59,7 +62,7 @@ app.MapGet("/", () => Results.Content(
     "<ul><li><a href='/swagger' style='color: lightblue;'>Swagger</a></li><li>POST /api/process-video</li></ul></body></html>",
     "text/html; charset=utf-8"));
 
-app.MapPost("/api/process-video", async (IFormFile? file, int intervalSec, IConfiguration config, IHttpClientFactory httpFactory, ILogger<Program> logger, CancellationToken ct) =>
+app.MapPost("/api/process-video", async (IFormFile? file, int intervalSec, IConfiguration config, IHttpClientFactory httpFactory, GpsOverlayOcr gpsOcr, ILogger<Program> logger, CancellationToken ct) =>
 {
     if (file == null || file.Length == 0)
         return Results.BadRequest("Файл не передан");
@@ -89,7 +92,7 @@ app.MapPost("/api/process-video", async (IFormFile? file, int intervalSec, IConf
         var psi = new System.Diagnostics.ProcessStartInfo
         {
             FileName = ffmpegPath,
-            ArgumentList = { "-y", "-i", videoPath, "-vf", $"fps=1/{intervalSec}", "-q:v", "2", framePattern },
+            ArgumentList = { "-y", "-i", videoPath, "-vf", $"fps=1/{intervalSec},scale=1920:-2", "-q:v", "2", framePattern },
             RedirectStandardError = true,
             RedirectStandardOutput = true,
             CreateNoWindow = true
@@ -123,10 +126,30 @@ app.MapPost("/api/process-video", async (IFormFile? file, int intervalSec, IConf
         var http = httpFactory.CreateClient("Nomeroff");
         var results = new List<object>();
         int frameIndex = 0;
+        int gpsOkCount = 0;
         foreach (var framePath in frameFiles)
         {
             var bytes = await File.ReadAllBytesAsync(framePath, ct);
             var base64 = Convert.ToBase64String(bytes);
+
+            double? latitude = null;
+            double? longitude = null;
+            string? overlayTimeUtc = null;
+            if (gpsOcr.IsAvailable)
+            {
+                var overlay = await gpsOcr.TryExtractFromFileAsync(framePath, ct);
+                latitude = overlay.Latitude;
+                longitude = overlay.Longitude;
+                if (overlay.OverlayTime is { } local)
+                {
+                    var utc = DateTime.SpecifyKind(local, DateTimeKind.Local).ToUniversalTime();
+                    overlayTimeUtc = utc.ToString("O");
+                }
+
+                if (latitude.HasValue && longitude.HasValue)
+                    gpsOkCount++;
+            }
+
             var body = new { image_base64 = base64 };
             var response = await http.PostAsJsonAsync("api/process_frame", body, ct);
             if (!response.IsSuccessStatusCode)
@@ -149,10 +172,13 @@ app.MapPost("/api/process-video", async (IFormFile? file, int intervalSec, IConf
                     }
                 }
             }
-            results.Add(new { timeSec, plates, imageBase64 = base64 });
-            logger.LogDebug("process-video: frame {Index} @ {TimeSec}s, plates={Plates}", frameIndex, timeSec, plates.Count);
+            results.Add(new { timeSec, plates, imageBase64 = base64, latitude, longitude, overlayTimeUtc });
+            logger.LogDebug("process-video: frame {Index} @ {TimeSec}s, plates={Plates}, gps={Lat},{Lon}",
+                frameIndex, timeSec, plates.Count, latitude, longitude);
             frameIndex++;
         }
+        if (gpsOcr.IsAvailable)
+            logger.LogInformation("process-video: GPS OCR распознано на {GpsOk}/{Total} кадрах", gpsOkCount, results.Count);
         logger.LogInformation("process-video: done, processed={Count}", frameIndex);
         return Results.Ok(new { totalFrames = results.Count, intervalSec, results });
     }

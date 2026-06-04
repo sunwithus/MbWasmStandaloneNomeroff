@@ -12,7 +12,8 @@
   <ItemGroup>
     <Compile Remove="Examples\**\*" />
     <Content Remove="Examples\**\*" />
-    <Content Include="Examples\*.jpg" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Examples\*.jpg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Examples\*.IBS" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="empty38.zip" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Update="ibclient64.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

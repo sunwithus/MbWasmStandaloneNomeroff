@@ -367,4 +367,7 @@ MigrationBackup/
 **/pattern.docx
 **/ffprobe.exe
 **/ffmpeg.exe
+**/tessdata/
+**/*.traineddata
 **/*.ibs
+.aider*

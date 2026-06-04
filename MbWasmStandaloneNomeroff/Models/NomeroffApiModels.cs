@@ -71,6 +71,12 @@ public class ProcessVideoFrameResult
     /// <summary>Base64 кадра для сохранения в БД (скриншот при распознавании).</summary>
     [JsonPropertyName("imageBase64")]
     public string? ImageBase64 { get; set; }
+    [JsonPropertyName("latitude")]
+    public double? Latitude { get; set; }
+    [JsonPropertyName("longitude")]
+    public double? Longitude { get; set; }
+    [JsonPropertyName("overlayTimeUtc")]
+    public string? OverlayTimeUtc { get; set; }
 }
 
 /// <summary>Ответ POST /api/process-video (Records API: ffmpeg + Python)</summary>

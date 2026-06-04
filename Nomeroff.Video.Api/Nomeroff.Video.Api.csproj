@@ -6,11 +6,27 @@
     <RootNamespace>Nomeroff.Video.Api</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
+    <PackageReference Include="Tesseract" Version="5.2.0" />
   </ItemGroup>
   <ItemGroup>
     <None Update="ffmpeg.exe">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <Content Include="tessdata\eng.traineddata" Condition="Exists('tessdata\eng.traineddata')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
+  <Target Name="DownloadTessdata" BeforeTargets="Build"
+          Condition="!Exists('$(MSBuildProjectDirectory)\tessdata\eng.traineddata')">
+    <MakeDir Directories="$(MSBuildProjectDirectory)\tessdata" />
+    <Exec IgnoreExitCode="true"
+          Command="powershell -NoProfile -Command &quot;Invoke-WebRequest -Uri 'https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata' -OutFile '$(MSBuildProjectDirectory)\tessdata\eng.traineddata' -UseBasicParsing&quot;" />
+    <Warning Condition="!Exists('$(MSBuildProjectDirectory)\tessdata\eng.traineddata')"
+             Text="GPS OCR: скачайте eng.traineddata в Nomeroff.Video.Api\tessdata\" />
+  </Target>
 </Project>
