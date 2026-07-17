@@ -5,10 +5,10 @@
 
 <PageTitle>Watchlist</PageTitle>
 
-<MudText Typo="Typo.h4" GutterBottom="true">Список наблюдения</MudText>
-<MudText Typo="Typo.body2" Class="mb-4">Хранится в браузере (localStorage). При распознавании совпадения вызывают звук и уведомление.</MudText>
+<MudText Typo="Typo.h4" Class="page-title" GutterBottom="true">Список контроля</MudText>
+<MudText Typo="Typo.body1" Class="mb-4" Style="max-width:40rem;">Номера для звукового сигнала. Сохраняется в браузере (латиница и кириллица сравниваются как одно и то же).</MudText>
 
-<MudPaper Class="pa-4" Outlined="true">
+<MudPaper Class="pa-4 soft-card" Outlined="true" Elevation="0">
     <MudStack Row="true" Spacing="2" Class="mb-4" AlignItems="AlignItems.Center">
         <MudTextField @bind-Value="_newPlate" Label="Новый номер" Variant="Variant.Outlined" Placeholder="А123БВ777"
                      Style="max-width: 200px;" OnKeyDown="OnNewPlateKeyDown" />
@@ -80,11 +80,7 @@
         if (e.Key == "Enter") await AddPlate();
     }
 
-    private static string Normalize(string s)
-    {
-        if (string.IsNullOrWhiteSpace(s)) return "";
-        return new string(s.Where(c => char.IsLetterOrDigit(c)).ToArray()).ToUpperInvariant();
-    }
+    private static string Normalize(string s) => PlateAlphabet.Normalize(s);
 
     private async Task SaveToFile()
     {

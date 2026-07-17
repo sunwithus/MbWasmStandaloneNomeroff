@@ -1,0 +1,16 @@
+@page "/db"
+@inject SettingsService SettingsSvc
+
+<PageTitle>База записей</PageTitle>
+
+<MudText Typo="Typo.h4" Class="page-title" GutterBottom="true">База записей</MudText>
+<MudText Typo="Typo.body1" Class="mb-4" Style="max-width:42rem;">
+    Архив распознанных номеров в Interbase — просмотр, проверка связи и выгрузка кадров.
+</MudText>
+
+<MudPaper Class="pa-0 soft-card overflow-hidden" Outlined="true" Elevation="0">
+    <iframe title="База записей"
+            src="/ops/db"
+            style="border:none; width:100%; height:70vh; background:#FFFBF5;"
+            loading="lazy"></iframe>
+</MudPaper>

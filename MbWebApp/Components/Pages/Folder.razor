@@ -1,0 +1,217 @@
+@page "/folder"
+@inject FolderWatchState WatchState
+@inject FolderWatchService WatchService
+@inject SettingsService SettingsSvc
+@inject ISnackbar Snackbar
+@implements IDisposable
+@using MbWebApp.Services
+
+<PageTitle>Папка — автообработка</PageTitle>
+
+<MudText Typo="Typo.h4" GutterBottom="true">Папка с видео</MudText>
+<MudText Typo="Typo.body2" Class="mb-4">
+    Мониторинг папки: новые и существующие видео обрабатываются по очереди.
+    После успеха — перемещение в Processed или удаление.
+</MudText>
+
+<MudPaper Class="pa-4" Outlined="true">
+    <MudStack Spacing="2">
+        <MudTextField @bind-Value="_watchFolder" Label="Папка" Disabled="@_status.Running" />
+        <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Style="flex-wrap:wrap;">
+            <MudNumericField T="int" @bind-Value="_intervalSec" Label="Интервал кадров (сек)" Min="1" Max="60"
+                             Style="width:160px;" Disabled="@_status.Running" Immediate="true" />
+            <MudCheckBox T="bool" @bind-Value="_saveToDb" Label="Сохранять в БД" Color="Color.Primary" Disabled="@_status.Running" />
+            <MudRadioGroup T="FolderAfterAction" @bind-Value="_afterAction" Disabled="@_status.Running">
+                <MudRadio T="FolderAfterAction" Value="FolderAfterAction.Move" Color="Color.Primary">Перемещать в Processed</MudRadio>
+                <MudRadio T="FolderAfterAction" Value="FolderAfterAction.Delete" Color="Color.Error">Удалять</MudRadio>
+            </MudRadioGroup>
+        </MudStack>
+        <MudStack Row="true" Spacing="2">
+            @if (!_status.Running)
+            {
+                <MudButton Variant="Variant.Outlined" Color="Color.Default" StartIcon="@Icons.Material.Filled.Save" OnClick="SaveSettingsAsync" Disabled="@_busy">
+                    Сохранить настройки
+                </MudButton>
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.PlayArrow" OnClick="StartAsync" Disabled="@_busy">
+                    Старт мониторинга
+                </MudButton>
+                <MudButton Variant="Variant.Outlined" Color="Color.Primary" StartIcon="@Icons.Material.Filled.PlaylistPlay" OnClick="ScanAsync" Disabled="@_busy">
+                    Сканировать сейчас
+                </MudButton>
+            }
+            else
+            {
+                <MudButton Variant="Variant.Filled" Color="Color.Error" StartIcon="@Icons.Material.Filled.Stop" OnClick="StopAsync">
+                    Стоп
+                </MudButton>
+            }
+        </MudStack>
+    </MudStack>
+</MudPaper>
+
+<MudPaper Class="pa-4 mt-4" Outlined="true">
+    <MudText Typo="Typo.subtitle1" GutterBottom="true">Статус</MudText>
+    <MudText Typo="Typo.body2">@_status.Message</MudText>
+    @if (!string.IsNullOrEmpty(_status.CurrentFile))
+    {
+        <MudText Typo="Typo.caption">Файл: @Path.GetFileName(_status.CurrentFile)</MudText>
+    }
+    @if (_status.ProgressTotal > 0)
+    {
+        <MudText Typo="Typo.caption" Class="mt-1">
+            Кадр @_status.ProgressCurrent / @_status.ProgressTotal
+            @if (_status.Percent > 0) { <text> · @_status.Percent%</text> }
+        </MudText>
+    }
+    <MudProgressLinear Class="mt-2" Color="Color.Primary"
+                       Value="@_status.Percent"
+                       Indeterminate="@(_status.Processing && _status.Percent <= 0)"
+                       Style="height:8px;" />
+    <MudText Typo="Typo.caption" Class="mt-2">В очереди: @_status.QueueCount · интервал в работе: @_status.Config.IntervalSec с</MudText>
+    @if (_status.Queue.Count > 0)
+    {
+        <MudText Typo="Typo.caption" Color="Color.Secondary">@string.Join(", ", _status.Queue)</MudText>
+    }
+    @if (!string.IsNullOrEmpty(_status.LastResultSummary))
+    {
+        <MudAlert Severity="Severity.Success" Dense="true" Class="mt-2">Последний: @_status.LastResultSummary</MudAlert>
+    }
+</MudPaper>
+
+@if (_status.Log.Count > 0)
+{
+    <MudPaper Class="pa-4 mt-4" Outlined="true">
+        <MudText Typo="Typo.subtitle1" GutterBottom="true">Журнал</MudText>
+        <MudStack Spacing="1" Style="max-height:280px; overflow:auto;">
+            @foreach (var e in _status.Log.Take(40))
+            {
+                <MudText Typo="Typo.caption" Color="@(e.Level == "error" ? Color.Error : e.Level == "ok" ? Color.Success : Color.Default)">
+                    @e.Utc.ToLocalTime().ToString("HH:mm:ss") — @e.Message
+                </MudText>
+            }
+        </MudStack>
+    </MudPaper>
+}
+
+@code {
+    private FolderWatchStatusDto _status = new();
+    private string _watchFolder = @"D:\REG_VIDEO";
+    private int _intervalSec = 2;
+    private bool _saveToDb = true;
+    private FolderAfterAction _afterAction = FolderAfterAction.Move;
+    private bool _busy;
+    private System.Threading.Timer? _timer;
+
+    protected override void OnInitialized()
+    {
+        LoadFormFromState();
+        RefreshStatus();
+        WatchState.Changed += OnStateChanged;
+        _timer = new System.Threading.Timer(_ => _ = InvokeAsync(RefreshStatusOnly), null, 1000, 1000);
+    }
+
+    private void OnStateChanged() => _ = InvokeAsync(RefreshStatusOnly);
+
+    private void RefreshStatusOnly()
+    {
+        RefreshStatus();
+        StateHasChanged();
+    }
+
+    private void RefreshStatus()
+    {
+        _status = WatchState.Snapshot();
+    }
+
+    private void LoadFormFromState()
+    {
+        var snap = WatchState.Snapshot();
+        _status = snap;
+        _watchFolder = snap.Config.WatchFolder;
+        _intervalSec = Math.Clamp(snap.Config.IntervalSec, 1, 60);
+        _saveToDb = snap.Config.SaveToDb;
+        _afterAction = snap.Config.AfterAction;
+    }
+
+    private async Task<FolderWatchConfig> BuildConfigAsync()
+    {
+        var cfg = WatchState.GetConfig();
+        cfg.WatchFolder = (_watchFolder ?? "").Trim();
+        cfg.IntervalSec = Math.Clamp(_intervalSec, 1, 60);
+        cfg.SaveToDb = _saveToDb;
+        cfg.AfterAction = _afterAction;
+        cfg.MoveSubfolder = string.IsNullOrWhiteSpace(cfg.MoveSubfolder) ? "Processed" : cfg.MoveSubfolder;
+        cfg.Watchlist = await SettingsSvc.GetWatchlistAsync();
+        cfg.DeviceName = await SettingsSvc.GetDeviceNameAsync();
+        cfg.DedupIntervalSec = await SettingsSvc.GetDedupIntervalSecAsync();
+        cfg.SkipSaveWithoutGps = await SettingsSvc.GetSkipSaveWithoutGpsAsync();
+        return cfg;
+    }
+
+    private async Task SaveSettingsAsync()
+    {
+        _busy = true;
+        try
+        {
+            var cfg = await BuildConfigAsync();
+            cfg.Enabled = false;
+            WatchState.SaveConfig(cfg);
+            Snackbar.Add($"Настройки сохранены (интервал {cfg.IntervalSec} с)", Severity.Success);
+            RefreshStatus();
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task StartAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_watchFolder) || !Directory.Exists(_watchFolder))
+        {
+            Snackbar.Add("Папка не существует", Severity.Warning);
+            return;
+        }
+        _busy = true;
+        try
+        {
+            var cfg = await BuildConfigAsync();
+            cfg.Enabled = true;
+            WatchState.SaveConfig(cfg);
+            WatchService.RequestStart();
+            Snackbar.Add($"Мониторинг запущен (интервал {cfg.IntervalSec} с)", Severity.Info);
+            RefreshStatus();
+        }
+        finally { _busy = false; }
+    }
+
+    private Task StopAsync()
+    {
+        WatchService.RequestStop();
+        Snackbar.Add("Мониторинг остановлен", Severity.Info);
+        RefreshStatus();
+        return Task.CompletedTask;
+    }
+
+    private async Task ScanAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_watchFolder) || !Directory.Exists(_watchFolder))
+        {
+            Snackbar.Add("Папка не существует", Severity.Warning);
+            return;
+        }
+        _busy = true;
+        try
+        {
+            var cfg = await BuildConfigAsync();
+            WatchState.SaveConfig(cfg);
+            WatchService.RequestScanOnce();
+            Snackbar.Add($"Сканирование (интервал {cfg.IntervalSec} с)", Severity.Info);
+            RefreshStatus();
+        }
+        finally { _busy = false; }
+    }
+
+    public void Dispose()
+    {
+        WatchState.Changed -= OnStateChanged;
+        _timer?.Dispose();
+    }
+}

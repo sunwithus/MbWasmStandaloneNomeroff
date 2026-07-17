@@ -1,4 +1,5 @@
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Jpeg;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 
@@ -29,26 +30,36 @@ internal static class OverlayImagePrep
         using var left = image.Clone(ctx => ctx.Crop(new Rectangle(0, y, leftW, cropH)));
         using var right = image.Clone(ctx => ctx.Crop(new Rectangle(rightX, y, rightW, cropH)));
 
+        TrimToTextRow(left, 0.70);
+        TrimToTextRow(right, 0.70);
+
+        // Для RapidOCR лучше нативный белый OSD на тёмном, без инверсии
         return (
-            ToPng(left, options.DateStripWidthPx, options.MinOutputHeightPx, sharpen: false),
-            ToPng(right, options.GpsStripWidthPx, options.MinOutputHeightPx, sharpen: true),
+            ToJpeg(left, options.DateStripWidthPx, options.MinOutputHeightPx),
+            ToJpeg(right, options.GpsStripWidthPx, options.MinOutputHeightPx),
             w,
             h);
     }
 
-    private static byte[] ToPng(Image<Rgb24> strip, int targetW, int targetH, bool sharpen)
+    private static void TrimToTextRow(Image<Rgb24> strip, double keepBottomRatio)
+    {
+        keepBottomRatio = Math.Clamp(keepBottomRatio, 0.25, 1.0);
+        var keepH = Math.Max(28, (int)(strip.Height * keepBottomRatio));
+        if (keepH >= strip.Height) return;
+        var y = strip.Height - keepH;
+        strip.Mutate(x => x.Crop(new Rectangle(0, y, strip.Width, keepH)));
+    }
+
+    private static byte[] ToJpeg(Image<Rgb24> strip, int targetW, int targetH)
     {
         strip.Mutate(s =>
         {
-            s.Resize(targetW, targetH);
-            s.Grayscale();
-            s.Contrast(1.4f);
-            if (sharpen)
-                s.GaussianSharpen();
+            s.Resize(targetW, Math.Max(targetH, 64), KnownResamplers.Lanczos3);
+            s.Contrast(1.15f);
         });
 
         using var ms = new MemoryStream();
-        strip.SaveAsPng(ms);
+        strip.SaveAsJpeg(ms, new JpegEncoder { Quality = 92 });
         return ms.ToArray();
     }
 }

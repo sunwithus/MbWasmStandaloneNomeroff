@@ -26,4 +26,15 @@ public sealed class GpsOcrOptions
     public string TessDataSubdir { get; set; } = "tessdata";
 
     public bool LogOcrTextOnMiss { get; set; } = true;
+
+    /// <summary>
+    /// Доля высоты кадра снизу, которую вырезать перед OCR номера
+    /// (капот + OSD: дата/время/GPS). 0 = не обрезать.
+    /// </summary>
+    public double PlateCropBottomRatio { get; set; } = 0.12;
+
+    /// <summary>
+    /// Если после обрезки номера не найдены — повторить OCR на увеличенной зоне дороги.
+    /// </summary>
+    public bool PlateRoiFallback { get; set; } = true;
 }

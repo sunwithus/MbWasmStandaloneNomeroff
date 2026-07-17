@@ -1,7 +1,9 @@
 @page "/file"
+@page "/"
 @inject RecordsService Records
 @inject NomeroffService Nomeroff
 @inject SettingsService SettingsSvc
+@inject VideoResultProcessor VideoProcessor
 @inject ISnackbar Snackbar
 @inject ILogger<File> Logger
 @using MbWebApp.Services
@@ -9,7 +11,9 @@
 <PageTitle>Файл - изображение или видео</PageTitle>
 
 <MudText Typo="Typo.h4" GutterBottom="true">Загрузка файла</MudText>
-<MudText Typo="Typo.body2" Class="mb-4">Выберите изображение или видео. Изображение - сразу; видео отправляется в Nomeroff.Video.Api (ffmpeg, OCR GPS с оверлея, распознавание номеров).</MudText>
+<MudText Typo="Typo.body2" Class="mb-4">
+    Изображение — сразу; видео — ffmpeg + OCR. Для папки целиком см. раздел «Папка».
+</MudText>
 
 <MudPaper Class="pa-4" Outlined="true">
     <MudStack Spacing="2">
@@ -33,8 +37,36 @@
             </MudStack>
             @if (_processing)
             {
-                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Style="height:6px;" Class="mt-2" />
-                <MudText Typo="Typo.caption">Загрузка в Nomeroff.Video.Api (ffmpeg + Python)...</MudText>
+                <MudPaper Class="pa-3 mt-2" Outlined="true" Style="background:var(--mud-palette-background-gray);">
+                    <MudText Typo="Typo.subtitle2" Class="mb-1">@_progressTitle</MudText>
+                    <MudText Typo="Typo.body2" Class="mb-2">@_progressMessage</MudText>
+                    @if (_progressTotal > 0)
+                    {
+                        <MudText Typo="Typo.caption" Class="mb-1">
+                            Кадр @_progressCurrent из @_progressTotal
+                            @if (_progressPercent > 0) { <text> · @_progressPercent%</text> }
+                        </MudText>
+                    }
+                    else if (_progressPercent > 0)
+                    {
+                        <MudText Typo="Typo.caption" Class="mb-1">@_progressPercent%</MudText>
+                    }
+                    <MudProgressLinear Color="Color.Primary"
+                                       Value="@_progressPercent"
+                                       Indeterminate="@(_progressPercent <= 0 && _progressTotal <= 0)"
+                                       Style="height:8px;" Class="mb-3" />
+                    <MudStack Spacing="1">
+                        @foreach (var step in _progressSteps)
+                        {
+                            <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center">
+                                <MudIcon Icon="@(step.Done ? Icons.Material.Filled.CheckCircle : step.Active ? Icons.Material.Filled.PlayCircle : Icons.Material.Filled.RadioButtonUnchecked)"
+                                         Color="@(step.Done ? Color.Success : step.Active ? Color.Primary : Color.Default)"
+                                         Size="Size.Small" />
+                                <MudText Typo="Typo.caption" Color="@(step.Active ? Color.Primary : Color.Default)">@step.Label</MudText>
+                            </MudStack>
+                        }
+                    </MudStack>
+                </MudPaper>
             }
         }
     </MudStack>
@@ -74,20 +106,18 @@
 {
     <MudPaper Class="pa-4 mt-4" Outlined="true">
         <MudText Typo="Typo.subtitle2" GutterBottom="true">Номера по видео</MudText>
-
         @if (_videoSummary is not null)
         {
             <MudText Typo="Typo.body2">
                 Файл: @_selectedVideoName (@FormatFileSize(_selectedVideoFile?.Size ?? 0))
             </MudText>
             <MudText Typo="Typo.body2">
-                Интервал кадров: @_videoSummary.IntervalSec с, обработано кадров: @_videoSummary.TotalFrames,
-                кадров с номерами: @_videoSummary.FramesWithPlates,
-                всего номеров: @_videoSummary.TotalPlates,
-                уникальных номеров: @_videoSummary.UniquePlates
+                Интервал: @_videoSummary.IntervalSec с, кадров: @_videoSummary.TotalFrames,
+                с номерами: @_videoSummary.FramesWithPlates,
+                всего: @_videoSummary.TotalPlates,
+                уникальных: @_videoSummary.UniquePlates
             </MudText>
         }
-
         <MudStack Row="true" Spacing="1" Style="flex-wrap:wrap;">
             @foreach (var r in _videoResults.OrderByDescending(x => x.TimeSec).Take(50))
             {
@@ -112,14 +142,20 @@
     private bool _processing;
     private string? _imagePreviewUrl;
     private int _videoIntervalSec = 1;
-    private bool _saveVideoToDb = false;
+    private bool _saveVideoToDb;
     private ProcessFrameResponse? _lastResponse;
-    private readonly List<VideoPlateResult> _videoResults = new();
+    private readonly List<VideoPlateHit> _videoResults = new();
     private readonly Dictionary<string, DateTime> _imageDedupCache = new();
-    private readonly Dictionary<string, VideoPlateDedupState> _videoDedupCache = new();
     private IBrowserFile? _selectedVideoFile;
     private string _selectedVideoName = "";
-    private VideoSummary? _videoSummary;
+    private VideoProcessSummary? _videoSummary;
+
+    private string _progressTitle = "";
+    private string _progressMessage = "";
+    private int _progressPercent;
+    private int _progressCurrent;
+    private int _progressTotal;
+    private List<ProgressStep> _progressSteps = new();
 
     private static string FormatFileSize(long bytes)
     {
@@ -187,128 +223,133 @@
         Snackbar.Add("Неподдерживаемый формат", Severity.Error);
     }
 
+    private void ResetProgressUi()
+    {
+        _progressTitle = "Обработка видео";
+        _progressMessage = "Подготовка...";
+        _progressPercent = 0;
+        _progressCurrent = 0;
+        _progressTotal = 0;
+        _progressSteps =
+        [
+            new ProgressStep("upload", "1. Загрузка на сервер"),
+            new ProgressStep("ffmpeg", "2. Извлечение кадров (ffmpeg)"),
+            new ProgressStep("ocr", "3. Распознавание номеров (OCR)"),
+            new ProgressStep("finalize", "4. Обработка результатов" + (_saveVideoToDb ? " и запись в БД" : ""))
+        ];
+    }
+
+    private void ApplyServerProgress(VideoProcessProgress p)
+    {
+        _progressMessage = string.IsNullOrWhiteSpace(p.Message) ? StageTitle(p.Stage) : p.Message;
+        _progressTitle = StageTitle(p.Stage);
+        if (p.Percent > 0) _progressPercent = Math.Clamp(p.Percent, 0, 100);
+        if (p.Total > 0)
+        {
+            _progressCurrent = p.Current;
+            _progressTotal = p.Total;
+        }
+        var map = p.Stage switch
+        {
+            "upload" or "save" => "upload",
+            "ffmpeg" => "ffmpeg",
+            "ocr" => "ocr",
+            "done" => "finalize",
+            _ => p.Stage
+        };
+        SetActiveStep(map);
+    }
+
+    private static string StageTitle(string stage) => stage switch
+    {
+        "upload" => "Загрузка",
+        "save" => "Подготовка",
+        "ffmpeg" => "Извлечение кадров",
+        "ocr" => "Распознавание",
+        "done" or "finalize" => "Завершение",
+        _ => "Обработка видео"
+    };
+
+    private void SetActiveStep(string id)
+    {
+        var order = new[] { "upload", "ffmpeg", "ocr", "finalize" };
+        var idx = Array.IndexOf(order, id);
+        if (idx < 0) return;
+        for (var i = 0; i < _progressSteps.Count; i++)
+        {
+            _progressSteps[i].Done = i < idx;
+            _progressSteps[i].Active = i == idx;
+        }
+    }
+
     private async Task ProcessVideoOnServer()
     {
         if (_selectedVideoFile == null) return;
         var videoUrl = await SettingsSvc.GetVideoApiBaseUrlAsync();
         if (string.IsNullOrEmpty(videoUrl))
         {
-            Snackbar.Add("Укажите URL Nomeroff.Video.Api в настройках", Severity.Warning);
+            Snackbar.Add("Укажите URL Video API в настройках", Severity.Warning);
             return;
         }
         _processing = true;
         _videoResults.Clear();
-        _videoDedupCache.Clear();
         _lastResponse = null;
         _videoSummary = null;
+        ResetProgressUi();
+        SetActiveStep("upload");
         StateHasChanged();
         try
         {
             var interval = Math.Clamp(_videoIntervalSec, 1, 60);
+            var progress = new Progress<VideoProcessProgress>(p =>
+            {
+                ApplyServerProgress(p);
+                _ = InvokeAsync(StateHasChanged);
+            });
             await using var stream = _selectedVideoFile.OpenReadStream(maxAllowedSize: 1024 * 1024 * 1024);
-            var apiResponse = await Records.ProcessVideoAsync(stream, _selectedVideoFile.Name, interval);
+            var apiResponse = await Records.ProcessVideoAsync(stream, _selectedVideoFile.Name, interval, progress);
             if (apiResponse == null)
             {
                 Logger.LogWarning("ProcessVideoOnServer: apiResponse=null");
-                Snackbar.Add("Ошибка обработки видео. Запущен ли Nomeroff.Video.Api? Установлен ли ffmpeg в PATH?", Severity.Error);
+                Snackbar.Add("Ошибка обработки видео. Проверьте OCR API и ffmpeg.", Severity.Error);
                 return;
             }
-            Logger.LogInformation("ProcessVideoOnServer: получено кадров={Count}, первый кадр ImageBase64={HasImg}",
-                apiResponse.Results.Count,
-                apiResponse.Results.FirstOrDefault()?.ImageBase64 != null ? (apiResponse.Results[0].ImageBase64?.Length ?? 0) + " bytes" : "null");
-            var watchlist = await SettingsSvc.GetWatchlistAsync();
-            var dedupSec = await SettingsSvc.GetDedupIntervalSecAsync();
-            var skipWithoutGps = await SettingsSvc.GetSkipSaveWithoutGpsAsync();
-            double? lastLat = null;
-            double? lastLon = null;
-            string? lastOverlayTimeUtc = null;
-            var savedWithGps = 0;
-            foreach (var fr in apiResponse.Results)
+
+            SetActiveStep("finalize");
+            _progressTitle = "Обработка результатов";
+            await InvokeAsync(StateHasChanged);
+
+            var outcome = await VideoProcessor.ProcessAsync(new VideoResultProcessRequest
             {
-                if (fr.Latitude.HasValue && fr.Longitude.HasValue)
+                ApiResponse = apiResponse,
+                SaveToDb = _saveVideoToDb,
+                DedupIntervalSec = await SettingsSvc.GetDedupIntervalSecAsync(),
+                SkipSaveWithoutGps = await SettingsSvc.GetSkipSaveWithoutGpsAsync(),
+                Watchlist = await SettingsSvc.GetWatchlistAsync(),
+                DeviceName = await SettingsSvc.GetDeviceNameAsync(),
+                Source = "video_file",
+                Progress = new Progress<(int current, int total, string message)>(p =>
                 {
-                    lastLat = fr.Latitude;
-                    lastLon = fr.Longitude;
-                }
+                    _progressCurrent = p.current;
+                    _progressTotal = p.total;
+                    _progressPercent = (int)(100.0 * p.current / Math.Max(p.total, 1));
+                    _progressMessage = p.message;
+                    if (p.current == 1 || p.current == p.total || p.current % 5 == 0)
+                        _ = InvokeAsync(StateHasChanged);
+                })
+            });
 
-                if (!string.IsNullOrEmpty(fr.OverlayTimeUtc))
-                    lastOverlayTimeUtc = fr.OverlayTimeUtc;
-
-                var frameLat = fr.Latitude ?? lastLat;
-                var frameLon = fr.Longitude ?? lastLon;
-
-                foreach (var plate in fr.Plates.Where(p => !string.IsNullOrWhiteSpace(p)))
-                {
-                    var plateNorm = plate.Trim().ToUpperInvariant();
-                    var isInWatchlist = watchlist.Any(w => string.Equals(w?.Trim(), plateNorm, StringComparison.OrdinalIgnoreCase));
-                    var hasGps = frameLat.HasValue && frameLon.HasValue;
-                    VideoPlateDedup.TryGetState(_videoDedupCache, plateNorm, out var dedupState);
-                    var withinDedup = VideoPlateDedup.IsWithinWindow(dedupState, fr.TimeSec, dedupSec);
-                    var isDup = VideoPlateDedup.IsDuplicateForDisplay(withinDedup, hasGps, dedupState);
-                    VideoPlateDedup.NoteSighting(_videoDedupCache, plateNorm, fr.TimeSec);
-                    _videoResults.Add(new VideoPlateResult
-                    {
-                        Plate = plateNorm,
-                        TimeSec = fr.TimeSec,
-                        Latitude = frameLat,
-                        Longitude = frameLon,
-                        IsInWatchlist = isInWatchlist,
-                        IsDuplicate = isDup
-                    });
-                    if (isInWatchlist && !isDup)
-                    {
-                        _ = Nomeroff.PlayBeepAsync();
-                        Snackbar.Add($"В watchlist: {plateNorm} (@{fr.TimeSec:F1}с)", Severity.Warning);
-                    }
-                    if (!VideoPlateDedup.ShouldSave(_saveVideoToDb, withinDedup, hasGps, dedupState))
-                        continue;
-
-                    if (skipWithoutGps && !hasGps)
-                        continue;
-
-                    var timeUtc = !string.IsNullOrEmpty(fr.OverlayTimeUtc)
-                        ? fr.OverlayTimeUtc
-                        : !string.IsNullOrEmpty(lastOverlayTimeUtc)
-                            ? lastOverlayTimeUtc
-                            : DateTime.UtcNow.AddSeconds(-fr.TimeSec).ToString("O");
-                    var dbName = await Records.GetOrCreateCurrentDbAsync();
-                    var deviceName = await SettingsSvc.GetDeviceNameAsync();
-                    var dto = new RecordDto
-                    {
-                        ScreenshotBase64 = fr.ImageBase64,
-                        Latitude = frameLat,
-                        Longitude = frameLon,
-                        TimeUtc = timeUtc,
-                        CarNumber = plateNorm,
-                        DeviceId = string.IsNullOrEmpty(deviceName) ? null : deviceName,
-                        Source = "video_file",
-                        Db = dbName
-                    };
-                    Logger.LogInformation("Video save: plate={Plate}, lat={Lat}, lon={Lon}, time={Time}, dedupUpgrade={Upgrade}",
-                        plateNorm, frameLat, frameLon, timeUtc, withinDedup);
-                    var saved = await Records.SaveRecordAsync(dto, default);
-                    if (saved && hasGps)
-                    {
-                        savedWithGps++;
-                        VideoPlateDedup.MarkSavedWithGps(_videoDedupCache, plateNorm);
-                    }
-                    Logger.LogInformation("Video save result: plate={Plate}, saved={Saved}", plateNorm, saved);
-                }
+            _videoResults.AddRange(outcome.Hits);
+            _videoSummary = outcome.Summary;
+            foreach (var alert in outcome.WatchlistAlerts)
+            {
+                _ = Nomeroff.PlayBeepAsync();
+                Snackbar.Add($"В watchlist: {alert}", Severity.Warning);
             }
-            var framesWithPlates = apiResponse.Results.Count(r => r.Plates.Any(p => !string.IsNullOrWhiteSpace(p)));
-            var totalPlates = apiResponse.Results.Sum(r => r.Plates.Count(p => !string.IsNullOrWhiteSpace(p)));
-            var uniquePlates = _videoResults.Select(v => v.Plate).Distinct(StringComparer.OrdinalIgnoreCase).Count();
-            _videoSummary = new VideoSummary
-            {
-                TotalFrames = apiResponse.TotalFrames,
-                IntervalSec = apiResponse.IntervalSec,
-                FramesWithPlates = framesWithPlates,
-                TotalPlates = totalPlates,
-                UniquePlates = uniquePlates
-            };
-            var gpsFrames = apiResponse.Results.Count(r => r.Latitude.HasValue && r.Longitude.HasValue);
-            Snackbar.Add($"Кадров: {apiResponse.TotalFrames}, номеров: {_videoResults.Count}, GPS на кадрах: {gpsFrames}" +
-                (_saveVideoToDb ? $", в БД с GPS: {savedWithGps}" : ""), Severity.Info);
+            Snackbar.Add(
+                $"Кадров: {outcome.Summary.TotalFrames}, номеров: {outcome.Hits.Count}, GPS: {outcome.Summary.GpsFrames}" +
+                (_saveVideoToDb ? $", в БД с GPS: {outcome.Summary.SavedWithGps}" : ""),
+                Severity.Info);
         }
         catch (Exception ex)
         {
@@ -323,11 +364,8 @@
 
     private async Task MaybeSaveRecordsForImage(string screenshotBase64, ProcessFrameResponse response)
     {
-        var skipWithoutGps = await SettingsSvc.GetSkipSaveWithoutGpsAsync();
-        if (skipWithoutGps)
-        {
+        if (await SettingsSvc.GetSkipSaveWithoutGpsAsync())
             return;
-        }
         var timeUtc = DateTime.UtcNow.ToString("O");
         var deviceName = await SettingsSvc.GetDeviceNameAsync();
         foreach (var p in response.Plates.Where(x => !x.IsDuplicate))
@@ -336,8 +374,6 @@
             var saved = await Records.SaveRecordAsync(new RecordDto
             {
                 ScreenshotBase64 = screenshotBase64,
-                Latitude = null,
-                Longitude = null,
                 TimeUtc = timeUtc,
                 CarNumber = p.Plate,
                 DeviceId = string.IsNullOrEmpty(deviceName) ? null : deviceName,
@@ -350,32 +386,23 @@
 
     private static void EnrichPlates(ProcessFrameResponse response, List<string> watchlist, Dictionary<string, DateTime> dedupCache, int dedupSec)
     {
-        var set = watchlist.Select(s => s?.Trim().ToUpperInvariant()).Where(s => !string.IsNullOrEmpty(s)).ToHashSet();
+        var set = watchlist.Select(PlateAlphabet.Normalize).Where(s => !string.IsNullOrEmpty(s)).ToHashSet();
         foreach (var p in response.Plates)
         {
-            var plate = p.Plate?.Trim().ToUpperInvariant() ?? "";
+            var plate = PlateAlphabet.Normalize(p.Plate);
+            p.Plate = plate;
             p.IsInWatchlist = set.Contains(plate);
             p.IsDuplicate = dedupCache.TryGetValue(plate, out var last) && (DateTime.UtcNow - last).TotalSeconds < dedupSec;
             dedupCache[plate] = DateTime.UtcNow;
         }
     }
 
-    private sealed class VideoPlateResult
+    private sealed class ProgressStep
     {
-        public string Plate { get; set; } = "";
-        public double TimeSec { get; set; }
-        public double? Latitude { get; set; }
-        public double? Longitude { get; set; }
-        public bool IsInWatchlist { get; set; }
-        public bool IsDuplicate { get; set; }
-    }
-
-    private sealed class VideoSummary
-    {
-        public int TotalFrames { get; set; }
-        public int IntervalSec { get; set; }
-        public int FramesWithPlates { get; set; }
-        public int TotalPlates { get; set; }
-        public int UniquePlates { get; set; }
+        public ProgressStep(string id, string label) { Id = id; Label = label; }
+        public string Id { get; }
+        public string Label { get; }
+        public bool Done { get; set; }
+        public bool Active { get; set; }
     }
 }

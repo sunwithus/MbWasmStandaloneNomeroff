@@ -3,45 +3,70 @@
 @inject RecognitionStateService RecState
 @inject NavigationManager Nav
 
-<MudThemeProvider Theme="@_theme" IsDarkMode="_isDarkMode" />
+<MudThemeProvider Theme="@_theme" IsDarkMode="false" />
 <MudPopoverProvider />
 <MudDialogProvider />
 <MudSnackbarProvider />
 
-<MudLayout>
-    <MudAppBar Elevation="1">
-        <MudIconButton Icon="@Icons.Material.Filled.Menu" Color="Color.Inherit" Edge="Edge.Start" OnClick="@DrawerToggle" />
-        <MudText Typo="Typo.h6" Class="ml-2">Nomeroff</MudText>
-        <MudSpacer />
-        <!-- <MudIconButton Icon="@(DarkLightModeButtonIcon)" Color="Color.Inherit" OnClick="@DarkModeToggle" /> -->
-    </MudAppBar>
+<div class="app-shell">
+    <MudLayout>
+        <MudAppBar Elevation="0" Class="app-bar" Dense="false">
+            <MudIconButton Icon="@Icons.Material.Filled.Menu" Color="Color.Inherit" Edge="Edge.Start" OnClick="@DrawerToggle" aria-label="Меню" />
+            <div class="brand ms-2">
+                <span class="brand-mark" aria-hidden="true"></span>
+                <div class="brand-text">
+                    <MudText Typo="Typo.h6" Class="brand-title mb-0">Nomeroff</MudText>
+                    <MudText Typo="Typo.caption" Class="brand-sub">YOLO · GPS · Interbase</MudText>
+                </div>
+            </div>
+            <MudSpacer />
+            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Class="status-chip d-none d-sm-flex"
+                     Color="@(RecState.IsRunning ? Color.Success : Color.Default)">
+                @(RecState.IsRunning ? "Съёмка идёт" : "Ожидание")
+            </MudChip>
+        </MudAppBar>
 
-    <MudDrawer @bind-Open="_drawerOpen" ClipMode="DrawerClipMode.Always" Elevation="2">
-        <NavMenu />
-    </MudDrawer>
+        <MudDrawer @bind-Open="_drawerOpen" ClipMode="DrawerClipMode.Always" Elevation="0" Class="app-drawer" Variant="DrawerVariant.Responsive" Breakpoint="Breakpoint.Md">
+            <div class="drawer-hero pa-4">
+                <MudText Typo="Typo.subtitle1" Class="mb-1">Панель</MudText>
+            </div>
+            <NavMenu />
+        </MudDrawer>
 
-    <MudMainContent Class="pt-16 pa-4">
-        @Body
-        <RecognitionControlPanel />
-    </MudMainContent>
-</MudLayout>
+        <MudMainContent Class="app-main pt-16 pa-4 pa-md-6">
+            <div class="page-canvas">
+                @Body
+            </div>
+            <RecognitionControlPanel />
+        </MudMainContent>
+    </MudLayout>
+</div>
 
 @code {
     private bool _drawerOpen = true;
-    private bool _isDarkMode = true;
     private MudTheme? _theme;
-
     private static bool _autoStartAlreadyTriggered;
 
     protected override void OnInitialized()
     {
         base.OnInitialized();
-
-        _theme = new()
+        _theme = new MudTheme
         {
             PaletteLight = _lightPalette,
-            PaletteDark = _darkPalette,
-            LayoutProperties = new LayoutProperties()
+            Typography = new Typography
+            {
+                Default = new DefaultTypography
+                {
+                    FontFamily = new[] { "Manrope", "Segoe UI", "sans-serif" }
+                },
+                H4 = new H4Typography { FontFamily = new[] { "Fraunces", "Georgia", "serif" }, FontWeight = "600" },
+                H5 = new H5Typography { FontFamily = new[] { "Fraunces", "Georgia", "serif" }, FontWeight = "600" },
+                H6 = new H6Typography { FontFamily = new[] { "Fraunces", "Georgia", "serif" }, FontWeight = "600" },
+            },
+            LayoutProperties = new LayoutProperties
+            {
+                DefaultBorderRadius = "14px"
+            }
         };
     }
 
@@ -62,59 +87,28 @@
         }
     }
 
-    private void DrawerToggle()
-    {
-        _drawerOpen = !_drawerOpen;
-    }
-
-    private void DarkModeToggle()
-    {
-        _isDarkMode = !_isDarkMode;
-    }
+    private void DrawerToggle() => _drawerOpen = !_drawerOpen;
 
     private readonly PaletteLight _lightPalette = new()
     {
-        Black = "#110e2d",
-        AppbarText = "#424242",
-        AppbarBackground = "rgba(255,255,255,0.8)",
-        DrawerBackground = "#ffffff",
-        GrayLight = "#e8e8e8",
-        GrayLighter = "#f9f9f9",
-    };
-
-    private readonly PaletteDark _darkPalette = new()
-    {
-        Primary = "#7e6fff",
-        Surface = "#1e1e2d",
-        Background = "#1a1a27",
-        BackgroundGray = "#151521",
-        AppbarText = "#92929f",
-        AppbarBackground = "rgba(26,26,39,0.8)",
-        DrawerBackground = "#1a1a27",
-        ActionDefault = "#74718e",
-        ActionDisabled = "#9999994d",
-        ActionDisabledBackground = "#605f6d4d",
-        TextPrimary = "#b2b0bf",
-        TextSecondary = "#92929f",
-        TextDisabled = "#ffffff33",
-        DrawerIcon = "#92929f",
-        DrawerText = "#92929f",
-        GrayLight = "#2a2833",
-        GrayLighter = "#1e1e2d",
-        Info = "#4a86ff",
-        Success = "#3dcb6c",
-        Warning = "#ffb545",
-        Error = "#ff3f5f",
-        LinesDefault = "#33323e",
-        TableLines = "#33323e",
-        Divider = "#292838",
-        OverlayLight = "#1e1e2d80",
-    };
-
-    public string DarkLightModeButtonIcon => _isDarkMode switch
-    {
-        true => Icons.Material.Rounded.AutoMode,
-        false => Icons.Material.Outlined.DarkMode,
+        Primary = "#0F6B5C",
+        Secondary = "#C45C26",
+        AppbarBackground = "rgba(247, 243, 235, 0.92)",
+        AppbarText = "#1C2A26",
+        Background = "#F3EDE3",
+        Surface = "#FFFBF5",
+        DrawerBackground = "#F7F3EB",
+        DrawerText = "#24332E",
+        DrawerIcon = "#3D534B",
+        TextPrimary = "#1C2A26",
+        TextSecondary = "#5C6B64",
+        ActionDefault = "#3D534B",
+        LinesDefault = "#E4DDD0",
+        Divider = "#E0D8C8",
+        TableLines = "#E4DDD0",
+        Success = "#2F8F5B",
+        Warning = "#C9862A",
+        Error = "#C1453D",
+        Info = "#2F6F8F",
     };
 }
-

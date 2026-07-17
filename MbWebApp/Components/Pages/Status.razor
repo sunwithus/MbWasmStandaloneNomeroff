@@ -1,0 +1,97 @@
+@page "/status"
+@using System.Text.Json
+@inject SettingsService Settings
+@inject RecordsService Records
+@inject NomeroffService Nomeroff
+@inject ISnackbar Snackbar
+@inject NavigationManager Nav
+
+<PageTitle>Состояние</PageTitle>
+
+<MudText Typo="Typo.h4" Class="page-title" GutterBottom="true">Состояние системы</MudText>
+<MudText Typo="Typo.body1" Class="mb-4" Style="max-width:42rem;">
+    Два процесса: это окно (UI + GPS + БД + видео) и Python OCR на порту 8000.
+</MudText>
+
+<MudGrid>
+    <MudItem xs="12" md="6">
+        <MudPaper Class="pa-4 soft-card mb-4" Outlined="true" Elevation="0">
+            <MudStack Spacing="2">
+                <MudText Typo="Typo.subtitle1">Приложение (:5555)</MudText>
+                <MudChip T="string" Color="@(_appOk ? Color.Success : Color.Error)" Size="Size.Small">@(_appOk ? "онлайн" : "нет ответа")</MudChip>
+                <MudText Typo="Typo.caption">@_appDetail</MudText>
+                <MudButton Variant="Variant.Outlined" Size="Size.Small" OnClick="() => RefreshAsync()" StartIcon="@Icons.Material.Filled.Refresh">Обновить</MudButton>
+            </MudStack>
+        </MudPaper>
+    </MudItem>
+    <MudItem xs="12" md="6">
+        <MudPaper Class="pa-4 soft-card mb-4" Outlined="true" Elevation="0">
+            <MudStack Spacing="2">
+                <MudText Typo="Typo.subtitle1">Распознавание OCR (:8000)</MudText>
+                <MudChip T="string" Color="@(_ocrOk ? Color.Success : Color.Warning)" Size="Size.Small">@(_ocrOk ? "модель готова" : "недоступно")</MudChip>
+                <MudText Typo="Typo.caption">@_ocrDetail</MudText>
+                <MudButton Variant="Variant.Text" Size="Size.Small" Href="/swagger" Target="_blank">Swagger API</MudButton>
+            </MudStack>
+        </MudPaper>
+    </MudItem>
+</MudGrid>
+
+<MudPaper Class="pa-4 soft-card" Outlined="true" Elevation="0">
+    <MudText Typo="Typo.subtitle2" Class="mb-2">GPS</MudText>
+    <MudText Typo="Typo.body2">@_gpsDetail</MudText>
+</MudPaper>
+
+@code {
+    private bool _appOk;
+    private bool _ocrOk;
+    private string _appDetail = "…";
+    private string _ocrDetail = "…";
+    private string _gpsDetail = "…";
+
+    protected override async Task OnInitializedAsync() => await RefreshAsync(showSnack: false);
+
+    private async Task RefreshAsync() => await RefreshAsync(showSnack: true);
+
+    private async Task RefreshAsync(bool showSnack)
+    {
+        try
+        {
+            using var http = new HttpClient { BaseAddress = new Uri(Nav.BaseUri), Timeout = TimeSpan.FromSeconds(5) };
+            using var doc = JsonDocument.Parse(await http.GetStringAsync("health"));
+            _appOk = true;
+            _appDetail = doc.RootElement.ToString();
+        }
+        catch (Exception ex)
+        {
+            _appOk = false;
+            _appDetail = ex.Message;
+        }
+
+        try
+        {
+            var status = await Nomeroff.HealthAsync();
+            _ocrOk = status?.ModelLoaded == true;
+            _ocrDetail = status == null ? "нет ответа" : $"{status.Status}, model_loaded={status.ModelLoaded}";
+        }
+        catch (Exception ex)
+        {
+            _ocrOk = false;
+            _ocrDetail = ex.Message;
+        }
+
+        try
+        {
+            var (lat, lon) = await Records.GetGpsPositionAsync();
+            _gpsDetail = lat.HasValue && lon.HasValue
+                ? $"Координаты: {lat:F5}, {lon:F5}"
+                : "Приёмник без фикса (подключите COM на странице GPS).";
+        }
+        catch (Exception ex)
+        {
+            _gpsDetail = ex.Message;
+        }
+
+        if (showSnack)
+            Snackbar.Add("Статус обновлён", Severity.Info);
+    }
+}

@@ -5,10 +5,16 @@ public static class DbViewerHtml
 {
     public static string GetHtml(string baseUrl, string webRootPath)
     {
-        var path = Path.Combine(webRootPath, "db-viewer.html");
-        var html = File.Exists(path)
-            ? File.ReadAllText(path)
-            : throw new FileNotFoundException("db-viewer.html не найден в wwwroot", path);
+        var candidates = new[]
+        {
+            Path.Combine(webRootPath, "db-viewer.html"),
+            Path.Combine(AppContext.BaseDirectory, "wwwroot", "db-viewer.html"),
+            Path.Combine(AppContext.BaseDirectory, "db-viewer.html"),
+        };
+        string? path = candidates.FirstOrDefault(File.Exists);
+        if (path == null)
+            throw new FileNotFoundException("db-viewer.html не найден в wwwroot", candidates[0]);
+        var html = File.ReadAllText(path);
         var safeBaseUrl = baseUrl.Replace("\\", "\\\\").Replace("'", "\\'");
         return html.Replace("{baseUrl}", safeBaseUrl);
     }

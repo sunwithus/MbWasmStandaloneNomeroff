@@ -42,27 +42,33 @@ public sealed class GpsOverlayOcr : IDisposable
         string gpsText = "";
         string dateText = "";
 
-        if (UseTesseract(_options.Engine) && _tesseract?.IsAvailable == true)
+        // Auto/Python: RapidOCR в Python читает OSD регистратора надёжнее Tesseract
+        if (UsePython(_options.Engine))
+        {
+            var py = await TryPythonOcrAsync(rightPng, leftPng, ct);
+            if (!string.IsNullOrWhiteSpace(py.Gps) || !string.IsNullOrWhiteSpace(py.Date))
+            {
+                gpsText = py.Gps;
+                dateText = py.Date;
+                usedEngine = "Python";
+            }
+        }
+
+        var overlayTime = GpsOverlayOcrParser.ParseOverlayDateTime(
+            string.IsNullOrWhiteSpace(dateText) ? gpsText : dateText);
+        // GPS и дата иногда в одной строке RapidOCR — парсим оба текста
+        var (lat, lon) = GpsOverlayOcrParser.ParseCoordinates(gpsText);
+        if (!lat.HasValue)
+            (lat, lon) = GpsOverlayOcrParser.ParseCoordinates(dateText);
+        if (!lat.HasValue)
+            (lat, lon) = GpsOverlayOcrParser.ParseCoordinates($"{gpsText} {dateText}");
+
+        if (!lat.HasValue && UseTesseract(_options.Engine) && _tesseract?.IsAvailable == true)
         {
             gpsText = _tesseract.Recognize(rightPng);
             dateText = _tesseract.Recognize(leftPng);
             usedEngine = "Tesseract";
-        }
-
-        var overlayTime = GpsOverlayOcrParser.ParseOverlayDateTime(dateText);
-        var (lat, lon) = GpsOverlayOcrParser.ParseCoordinates(gpsText);
-
-        if (!lat.HasValue && UsePython(_options.Engine))
-        {
-            var py = await TryPythonOcrAsync(rightPng, leftPng, ct);
-            if (!string.IsNullOrWhiteSpace(py.Gps))
-            {
-                gpsText = py.Gps;
-                usedEngine = "Python";
-            }
-            if (!string.IsNullOrWhiteSpace(py.Date))
-                dateText = py.Date;
-            overlayTime = GpsOverlayOcrParser.ParseOverlayDateTime(dateText);
+            overlayTime = GpsOverlayOcrParser.ParseOverlayDateTime(dateText) ?? overlayTime;
             (lat, lon) = GpsOverlayOcrParser.ParseCoordinates(gpsText);
         }
 
@@ -93,13 +99,17 @@ public sealed class GpsOverlayOcr : IDisposable
                 date_base64 = Convert.ToBase64String(leftPng)
             };
             var resp = await client.PostAsJsonAsync("api/ocr_overlay", body, ct);
-            if (!resp.IsSuccessStatusCode) return ("", "");
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Python ocr_overlay HTTP {Status}", resp.StatusCode);
+                return ("", "");
+            }
             var json = await resp.Content.ReadFromJsonAsync<JsonOverlayOcrResponse>(cancellationToken: ct);
             return (json?.GpsText ?? "", json?.DateText ?? "");
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Python ocr_overlay недоступен (pip install easyocr)");
+            _logger.LogWarning(ex, "Python ocr_overlay недоступен (pip install rapidocr-onnxruntime)");
             return ("", "");
         }
     }

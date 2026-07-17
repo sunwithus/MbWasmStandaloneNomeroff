@@ -76,7 +76,9 @@ public class RecordsService
         try
         {
             var r = await client.GetFromJsonAsync<JsonElement>("api/position", ct);
-            if (r.TryGetProperty("latitude", out var latProp) && r.TryGetProperty("longitude", out var lonProp))
+            if (r.ValueKind != JsonValueKind.Object) return (null, null);
+            if (r.TryGetProperty("latitude", out var latProp) && latProp.ValueKind == JsonValueKind.Number
+                && r.TryGetProperty("longitude", out var lonProp) && lonProp.ValueKind == JsonValueKind.Number)
                 return (latProp.GetDouble(), lonProp.GetDouble());
         }
         catch { }
@@ -137,7 +139,7 @@ public class RecordsService
         }
         _logger?.LogInformation("GetOrCreateCurrentDbAsync: создаём БД {Db} для даты {Date}", dbFileName, today);
         await CreateDbIfNeededAsync(dbFileName, ct);
-        await _settings.SetCurrentDbAsync(dbFileName, today);
+        try { await _settings.SetCurrentDbAsync(dbFileName, today); } catch { /* нет Blazor circuit — ок для folder watch */ }
         return dbFileName;
     }
 
@@ -212,7 +214,46 @@ public class RecordsService
         }
     }
 
-    public async Task<ProcessVideoResponse?> ProcessVideoAsync(Stream videoStream, string fileName, int intervalSec, CancellationToken ct = default)
+    public async Task<ProcessVideoResponse?> ProcessVideoFromPathAsync(
+        string videoPath,
+        int intervalSec,
+        IProgress<VideoProcessProgress>? progress = null,
+        CancellationToken ct = default)
+    {
+        var baseUrl = await _settings.GetVideoApiBaseUrlAsync();
+        if (string.IsNullOrEmpty(baseUrl)) return null;
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/api/process-video-path?intervalSec={intervalSec}")
+            {
+                Content = JsonContent.Create(new { path = videoPath })
+            };
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger?.LogWarning("ProcessVideoFromPathAsync: HTTP {Status}", response.StatusCode);
+                return null;
+            }
+            return await ReadNdjsonVideoResponseAsync(response, progress, ct);
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "ProcessVideoFromPathAsync failed");
+            return null;
+        }
+    }
+
+    public async Task<ProcessVideoResponse?> ProcessVideoAsync(
+        Stream videoStream,
+        string fileName,
+        int intervalSec,
+        IProgress<VideoProcessProgress>? progress = null,
+        CancellationToken ct = default)
     {
         var baseUrl = await _settings.GetVideoApiBaseUrlAsync();
         if (string.IsNullOrEmpty(baseUrl)) return null;
@@ -221,13 +262,96 @@ public class RecordsService
             using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(15) };
             using var content = new MultipartFormDataContent();
             content.Add(new StreamContent(videoStream), "file", fileName);
-            var response = await client.PostAsync($"{baseUrl}/api/process-video?intervalSec={intervalSec}", content, ct);
-            if (!response.IsSuccessStatusCode) return null;
-            return await response.Content.ReadFromJsonAsync<ProcessVideoResponse>(cancellationToken: ct);
+
+            progress?.Report(new VideoProcessProgress
+            {
+                Stage = "upload",
+                Message = "Загрузка видео на сервер...",
+                Percent = 0
+            });
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/api/process-video?intervalSec={intervalSec}")
+            {
+                Content = content
+            };
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger?.LogWarning("ProcessVideoAsync: HTTP {Status}", response.StatusCode);
+                return null;
+            }
+
+            return await ReadNdjsonVideoResponseAsync(response, progress, ct);
         }
-        catch
+        catch (InvalidOperationException)
         {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "ProcessVideoAsync failed");
             return null;
         }
+    }
+
+    private async Task<ProcessVideoResponse?> ReadNdjsonVideoResponseAsync(
+        HttpResponseMessage response,
+        IProgress<VideoProcessProgress>? progress,
+        CancellationToken ct)
+    {
+        var mediaType = response.Content.Headers.ContentType?.MediaType ?? "";
+        if (mediaType.Contains("json", StringComparison.OrdinalIgnoreCase) &&
+            !mediaType.Contains("ndjson", StringComparison.OrdinalIgnoreCase) &&
+            !mediaType.Contains("x-ndjson", StringComparison.OrdinalIgnoreCase))
+        {
+            return await response.Content.ReadFromJsonAsync<ProcessVideoResponse>(cancellationToken: ct);
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var reader = new StreamReader(stream);
+        ProcessVideoResponse? result = null;
+        string? error = null;
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            var line = await reader.ReadLineAsync(ct);
+            if (line == null) break;
+            if (string.IsNullOrWhiteSpace(line)) continue;
+
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
+
+            if (type == "progress")
+            {
+                progress?.Report(new VideoProcessProgress
+                {
+                    Stage = root.TryGetProperty("stage", out var s) ? s.GetString() ?? "" : "",
+                    Message = root.TryGetProperty("message", out var m) ? m.GetString() ?? "" : "",
+                    Percent = root.TryGetProperty("percent", out var p) ? p.GetInt32() : 0,
+                    Current = root.TryGetProperty("current", out var c) ? c.GetInt32() : 0,
+                    Total = root.TryGetProperty("total", out var tot) ? tot.GetInt32() : 0
+                });
+            }
+            else if (type == "error")
+            {
+                error = root.TryGetProperty("message", out var em) ? em.GetString() : "Ошибка обработки видео";
+                _logger?.LogWarning("ProcessVideo: server error={Error}", error);
+                break;
+            }
+            else if (type == "result")
+            {
+                result = JsonSerializer.Deserialize<ProcessVideoResponse>(line, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+            }
+        }
+
+        if (error != null)
+            throw new InvalidOperationException(error);
+
+        return result;
     }
 }

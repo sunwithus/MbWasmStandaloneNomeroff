@@ -22,9 +22,10 @@ public class SettingsService
     private const string KeyVideoApiBaseUrl = "NomeroffVideoApiBaseUrl";
 
     private const string DefaultApiBaseUrl = "http://127.0.0.1:8000";
-    private const string DefaultRecordsApiBaseUrl = "http://localhost:5552";
-    private const string DefaultGpsApiBaseUrl = "http://localhost:5551";
-    private const string DefaultVideoApiBaseUrl = "http://localhost:5553";
+    // GPS / Interbase / Video влиты в MbWebApp (:5555); Python OCR остаётся :8000
+    private const string DefaultRecordsApiBaseUrl = "http://localhost:5555";
+    private const string DefaultGpsApiBaseUrl = "http://localhost:5555";
+    private const string DefaultVideoApiBaseUrl = "http://localhost:5555";
     private const int DefaultCaptureIntervalMs = 1500;
     private const int DefaultDedupIntervalSec = 300;
 
@@ -176,7 +177,7 @@ public class SettingsService
             var v = await _js.InvokeAsync<string?>("settingsGet", KeyRecordsApiBaseUrl);
             return string.IsNullOrWhiteSpace(v) ? DefaultRecordsApiBaseUrl : v.TrimEnd('/');
         }
-        catch { return ""; }
+        catch { return DefaultRecordsApiBaseUrl; }
     }
 
     public async Task SetRecordsApiBaseUrlAsync(string url)

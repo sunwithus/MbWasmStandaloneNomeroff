@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ru"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Просмотр БД — Nomeroff</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:20px;background:#0f1419;color:#e6edf3}
+.container{max-width:1200px;margin:0 auto}
+h1{font-size:1.5rem;margin:0 0 20px;color:#58a6ff}
+.toolbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:16px}
+.toolbar select{padding:8px 12px;border:1px solid #30363d;border-radius:6px;background:#21262d;color:#e6edf3;min-width:180px}
+.toolbar button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-weight:500}
+.btn{background:#238636;color:#fff}
+.btn:hover{background:#2ea043}
+.btn-ghost{background:#21262d;color:#e6edf3;border:1px solid #30363d}
+.btn-ghost:hover{background:#30363d}
+.btn-danger{background:#da3633;color:#fff}
+.btn-danger:hover{background:#f85149}
+.status{padding:8px;border-radius:6px;font-size:14px}
+.status.ok{background:#23863633;color:#7ee787}
+.status.err{background:#da363333;color:#f85149}
+.table-wrap{overflow-x:auto;border-radius:8px;border:1px solid #30363d}
+table{width:100%;border-collapse:collapse;background:#161b22}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #21262d}
+th{background:#21262d;font-weight:600;white-space:nowrap}
+tr:hover{background:#21262d}
+.link-foto{color:#58a6ff;cursor:pointer;text-decoration:underline}
+.link-foto:hover{color:#79c0ff}
+.row-actions{display:flex;gap:6px}
+.empty{padding:40px;text-align:center;color:#8b949e}
+input[name=newdb]{padding:8px 12px;border:1px solid #30363d;border-radius:6px;background:#21262d;color:#e6edf3;width:160px}
+</style></head><body>
+<div class="container">
+  <h1>Просмотр БД Interbase</h1>
+  <div class="toolbar">
+    <select id="dbSelect" onchange="onDbChange()"><option value="">— Выберите БД —</option></select>
+    <button class="btn" onclick="load()">Обновить</button>
+    <button class="btn-ghost" onclick="testConn()">Тест</button>
+    <button class="btn-ghost" onclick="testWrite()">Тест запись</button>
+    <span id="status" class="status"></span>
+    <span style="margin-left:auto">
+      <input type="text" name="newdb" placeholder="Имя новой БД" id="newDbName" />
+      <button class="btn" onclick="createDb()">Создать БД</button>
+      <button class="btn-ghost btn-danger" onclick="deleteDb()" title="Удалить выбранную БД">Удалить БД</button>
+    </span>
+  </div>
+  <div class="table-wrap">
+    <table><thead><tr>
+      <th>ID</th><th>Устройство</th><th>Дата</th><th>Номер</th><th>Широта</th><th>Долгота</th><th>Фото</th><th></th>
+    </tr></thead><tbody id="tbody"></tbody></table>
+  </div>
+</div>
+<script>
+const base='{baseUrl}';
+let currentDb='';
+
+function openImageInNewWindow(id){
+  window.open(base+'/api/db/image/'+id+'?db='+encodeURIComponent(currentDb),'_blank');
+}
+
+async function loadDbs(){
+  const r=await fetch(base+'/api/db/list');
+  const j=await r.json();
+  const sel=document.getElementById('dbSelect');
+  sel.innerHTML='<option value="">— Выберите БД —</option>';
+  for(const d of j.databases||[]){
+    const o=document.createElement('option');
+    o.value=d;o.textContent=d;
+    sel.appendChild(o);
+  }
+}
+
+async function onDbChange(){
+  currentDb=document.getElementById('dbSelect').value;
+  if(currentDb) load();
+  else document.getElementById('tbody').innerHTML='<tr><td colspan=8 class=empty>Выберите БД</td></tr>';
+}
+
+async function load(){
+  if(!currentDb){document.getElementById('status').textContent='Выберите БД';document.getElementById('status').className='status err';return}
+  const tbody=document.getElementById('tbody');
+  tbody.innerHTML='<tr><td colspan=8>Загрузка...</td></tr>';
+  try{
+    const r=await fetch(base+'/api/db/records?db='+encodeURIComponent(currentDb)+'&limit=200');
+    const j=await r.json();
+    if(j.message){
+      tbody.innerHTML='<tr><td colspan=8 class=empty>'+j.message+'</td></tr>';
+      return;
+    }
+    let html='';
+    for(const row of j.records||[]){
+      const dt=row.s_DATETIME?new Date(row.s_DATETIME).toLocaleString('ru'):'';
+      const foto='<span class=link-foto onclick="openImageInNewWindow('+row.s_INCKEY+')" title="Открыть в новом окне">Фото</span>';
+      html+='<tr><td>'+row.s_INCKEY+'</td><td>'+escapeHtml(row.s_DEVICEID||'')+'</td><td>'+dt+'</td><td>'+escapeHtml(row.s_NOTICE||'')+'</td><td>'+(row.s_LATITUDE??'')+'</td><td>'+(row.s_LONGITUDE??'')+'</td><td>'+foto+'</td><td class=row-actions><button class="btn-ghost btn-danger" onclick="delRecord('+row.s_INCKEY+')" title="Удалить">✕</button></td></tr>';
+    }
+    tbody.innerHTML=html||'<tr><td colspan=8 class=empty>Нет записей</td></tr>';
+    document.getElementById('status').textContent='Загружено: '+(j.records?.length||0);
+    document.getElementById('status').className='status ok';
+  }catch(e){
+    tbody.innerHTML='<tr><td colspan=8 class=empty>Ошибка: '+escapeHtml(e.message)+'</td></tr>';
+    document.getElementById('status').textContent='Ошибка';
+    document.getElementById('status').className='status err';
+  }
+}
+
+function escapeHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+async function delRecord(id){
+  if(!confirm('Удалить запись '+id+'?'))return;
+  const r=await fetch(base+'/api/db/records/'+id+'?db='+encodeURIComponent(currentDb),{method:'DELETE'});
+  const j=await r.json();
+  if(j.success)load();else alert('Ошибка удаления');
+}
+
+async function testConn(){
+  if(!currentDb){document.getElementById('status').textContent='Выберите БД';document.getElementById('status').className='status err';return}
+  const r=await fetch(base+'/api/db/test?db='+encodeURIComponent(currentDb));
+  const j=await r.json();
+  document.getElementById('status').textContent=j.message||(j.success?'OK':'Ошибка');
+  document.getElementById('status').className='status '+(j.success?'ok':'err');
+}
+
+async function testWrite(){
+  if(!currentDb){alert('Выберите БД');return}
+  const r=await fetch(base+'/api/db/test-write?db='+encodeURIComponent(currentDb),{method:'POST'});
+  let j; try{j=await r.json()}catch{j={}};
+  if(j.success){load();document.getElementById('status').textContent='Записано id='+j.id;document.getElementById('status').className='status ok'}
+  else alert('Ошибка: '+(j.detail||j.message||j.title||r.statusText||'неизвестная'));
+}
+async function deleteDb(){
+  if(!currentDb){alert('Выберите БД');return}
+  if(!confirm('Удалить БД '+currentDb+'? Все данные будут потеряны!'))return;
+  const r=await fetch(base+'/api/db/delete?db='+encodeURIComponent(currentDb),{method:'DELETE'});
+  const j=await r.json();
+  alert(j.message);
+  if(j.success){currentDb='';await loadDbs();document.getElementById('tbody').innerHTML='<tr><td colspan=8 class=empty>Выберите БД</td></tr>'}
+}
+async function createDb(){
+  const name=document.getElementById('newDbName').value.trim();
+  if(!name){alert('Введите имя БД');return}
+  const r=await fetch(base+'/api/db/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+  const j=await r.json();
+  alert(j.message);
+  if(j.success){await loadDbs();document.getElementById('newDbName').value=''}
+}
+
+loadDbs();
+</script></body></html>

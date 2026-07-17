@@ -7,33 +7,22 @@
 
 <PageTitle>Настройки</PageTitle>
 
-<MudText Typo="Typo.h4" GutterBottom="true">Настройки</MudText>
+<MudText Typo="Typo.h4" Class="page-title" GutterBottom="true">Настройки</MudText>
+<MudText Typo="Typo.body1" Class="mb-4" Style="max-width:40rem;">Камера, GPS и как часто писать номера в базу.</MudText>
 
-<MudPaper Class="pa-4" Outlined="true">
+<MudPaper Class="pa-4 soft-card" Outlined="true" Elevation="0">
     <MudTextField @bind-Value="_deviceName" Margin="Margin.Dense" Label="Имя устройства" Variant="Variant.Outlined" FullWidth="true"
-                  HelperText="Используется при сохранении записей в БД (S_DEVICEID). По умолчанию - имя ПК." Class="mb-4" />
+                  HelperText="Попадёт в поле S_DEVICEID. По умолчанию — имя ПК." Class="mb-4" />
 
-
-    <MudGrid>
-        <MudItem xs="6">
-            <MudTextField @bind-Value="_apiBaseUrl" Margin="Margin.Dense" Label="URL API Nomeroff (Python)" Variant="Variant.Outlined" FullWidth="true"
-                          HelperText="http://127.0.0.1:8000" Class="mb-4" />
-        </MudItem>
-        <MudItem xs="6">
-            <MudTextField @bind-Value="_gpsApiBaseUrl" Margin="Margin.Dense" Label="URL GPS API" Variant="Variant.Outlined" FullWidth="true"
-                          HelperText="http://localhost:5551 - Nomeroff.Gps.Api (NMEA COM-порт)" Class="mb-4" />
-        </MudItem>
-    </MudGrid>
-    <MudGrid>
-        <MudItem xs="6">
-            <MudTextField @bind-Value="_recordsApiBaseUrl" Margin="Margin.Dense" Label="URL API записей (БД)" Variant="Variant.Outlined" FullWidth="true"
-                          HelperText="http://localhost:5552 - Nomeroff.Interbase.Api" Class="mb-4" />
-        </MudItem>
-        <MudItem xs="6">
-            <MudTextField @bind-Value="_videoApiBaseUrl" Margin="Margin.Dense" Label="URL Video API" Variant="Variant.Outlined" FullWidth="true"
-                          HelperText="http://localhost:5553 - Nomeroff.Video.Api (ffmpeg + Python)" Class="mb-4" />
-        </MudItem>
-    </MudGrid>
+    <MudExpansionPanels Class="mb-4" Elevation="0">
+        <MudExpansionPanel Text="Адреса сервисов (обычно не трогать)" Dense="true">
+            <MudText Typo="Typo.caption" Class="mb-3">OCR — Python :8000. Остальное по умолчанию это же приложение :5555.</MudText>
+            <MudTextField @bind-Value="_apiBaseUrl" Margin="Margin.Dense" Label="URL OCR (Python)" Variant="Variant.Outlined" FullWidth="true" Class="mb-3" />
+            <MudTextField @bind-Value="_gpsApiBaseUrl" Margin="Margin.Dense" Label="URL GPS" Variant="Variant.Outlined" FullWidth="true" Class="mb-3" />
+            <MudTextField @bind-Value="_recordsApiBaseUrl" Margin="Margin.Dense" Label="URL записей (БД)" Variant="Variant.Outlined" FullWidth="true" Class="mb-3" />
+            <MudTextField @bind-Value="_videoApiBaseUrl" Margin="Margin.Dense" Label="URL обработки видео" Variant="Variant.Outlined" FullWidth="true" />
+        </MudExpansionPanel>
+    </MudExpansionPanels>
     <MudGrid>
         <MudItem xs="6">
             <MudTextField @bind-Value="_captureIntervalMsStr" Margin="Margin.Dense" Label="Интервал авто-кадров (мс)" Variant="Variant.Outlined"
@@ -104,9 +93,9 @@
 @code {
     private string _deviceName = "";
     private string _apiBaseUrl = "http://127.0.0.1:8000";
-    private string _recordsApiBaseUrl = "http://localhost:5552";
-    private string _gpsApiBaseUrl = "http://localhost:5551";
-    private string _videoApiBaseUrl = "http://localhost:5553";
+    private string _recordsApiBaseUrl = "http://localhost:5555";
+    private string _gpsApiBaseUrl = "http://localhost:5555";
+    private string _videoApiBaseUrl = "http://localhost:5555";
     private string _captureIntervalMsStr = "1500";
     private string _dedupIntervalSecStr = "300";
     private bool _autoStart;

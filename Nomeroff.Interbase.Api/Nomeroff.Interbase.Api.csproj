@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
@@ -6,17 +6,22 @@
     <RootNamespace>Nomeroff.Interbase.Api</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="InterBaseSql.Data.InterBaseClient" Version="7.14.6" />
-    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Remove="Examples\**\*" />
-    <Content Remove="Examples\**\*" />
-    <Content Include="Examples\*.jpg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="Examples\*.IBS" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="empty38.zip" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <PackageReference Include="InterBaseSql.Data.InterBaseClient" Version="7.14.6" />
+    <ProjectReference Include="..\Nomeroff.Shared\Nomeroff.Shared.csproj" />
+    <ProjectReference Include="..\Nomeroff.Gps.Api\Nomeroff.Gps.Api.csproj" />
+  </ItemGroup>
+  <ItemGroup>
     <None Update="ibclient64.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <Content Include="empty38.zip" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Examples\*.jpg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Condition="Exists('Examples')" />
+    <Content Include="Examples\*.IBS" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Condition="Exists('Examples')" />
+    <!-- не публиковать wwwroot библиотеки как StaticWebAssets хоста -->
+    <Content Remove="wwwroot\**" />
+    <None Include="wwwroot\**" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
   </ItemGroup>
 </Project>

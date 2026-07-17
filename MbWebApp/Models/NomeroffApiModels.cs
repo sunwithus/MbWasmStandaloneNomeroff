@@ -79,3 +79,13 @@ public class ProcessVideoResponse
     [JsonPropertyName("results")]
     public List<ProcessVideoFrameResult> Results { get; set; } = new();
 }
+
+/// <summary>Событие прогресса из NDJSON-стрима POST /api/process-video</summary>
+public class VideoProcessProgress
+{
+    public string Stage { get; set; } = "";
+    public string Message { get; set; } = "";
+    public int Percent { get; set; }
+    public int Current { get; set; }
+    public int Total { get; set; }
+}

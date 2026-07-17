@@ -7,8 +7,40 @@
     <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
   </PropertyGroup>
 
-
   <ItemGroup>
     <PackageReference Include="MudBlazor" Version="9.1.0" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Nomeroff.Shared\Nomeroff.Shared.csproj" />
+    <ProjectReference Include="..\Nomeroff.Gps.Api\Nomeroff.Gps.Api.csproj" />
+    <ProjectReference Include="..\Nomeroff.Interbase.Api\Nomeroff.Interbase.Api.csproj" />
+    <ProjectReference Include="..\Nomeroff.Video.Api\Nomeroff.Video.Api.csproj" />
+  </ItemGroup>
+
+  <!-- Артефакты бывших отдельных API — в output хоста -->
+  <ItemGroup>
+    <None Include="..\Nomeroff.Video.Api\ffmpeg.exe" Link="ffmpeg.exe" Condition="Exists('..\Nomeroff.Video.Api\ffmpeg.exe')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <None Include="..\Nomeroff.Interbase.Api\ibclient64.dll" Link="ibclient64.dll" Condition="Exists('..\Nomeroff.Interbase.Api\ibclient64.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <Content Include="..\Nomeroff.Interbase.Api\empty38.zip" Link="empty38.zip" Condition="Exists('..\Nomeroff.Interbase.Api\empty38.zip')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\Nomeroff.Interbase.Api\Examples\**\*" Link="Examples\%(RecursiveDir)%(Filename)%(Extension)" Condition="Exists('..\Nomeroff.Interbase.Api\Examples')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\Nomeroff.Video.Api\tessdata\eng.traineddata" Link="tessdata\eng.traineddata" Condition="Exists('..\Nomeroff.Video.Api\tessdata\eng.traineddata')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 </Project>

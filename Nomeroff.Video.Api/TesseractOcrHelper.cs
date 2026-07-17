@@ -21,8 +21,10 @@ internal sealed class TesseractOcrHelper : IDisposable
         try
         {
             _engine = new TesseractEngine(tessPath, "eng", EngineMode.Default);
-            _engine.SetVariable("tessedit_char_whitelist", "0123456789.,;:/-NSEWnsewkmh ");
+            // Пустой whitelist — ° ' и цифры распознаются лучше, чем с жёстким списком
+            _engine.SetVariable("tessedit_char_whitelist", "");
             _engine.SetVariable("user_defined_dpi", "300");
+            _engine.DefaultPageSegMode = PageSegMode.SingleLine;
         }
         catch (Exception ex)
         {
@@ -39,7 +41,7 @@ internal sealed class TesseractOcrHelper : IDisposable
         {
             using var pix = Pix.LoadFromMemory(png);
             if (pix.Width < 80 || pix.Height < 40) return "";
-            using var page = _engine.Process(pix, PageSegMode.Auto);
+            using var page = _engine.Process(pix, PageSegMode.SingleLine);
             return page.GetText() ?? "";
         }
         catch (Exception ex)
