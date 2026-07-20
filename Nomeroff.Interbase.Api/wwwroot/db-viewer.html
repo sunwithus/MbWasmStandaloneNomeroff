@@ -36,6 +36,9 @@ input[name=newdb]{padding:8px 12px;border:1px solid #30363d;border-radius:6px;ba
   <div class="toolbar">
     <select id="dbSelect" onchange="onDbChange()"><option value="">— Выберите БД —</option></select>
     <button class="btn" onclick="load()">Обновить</button>
+    <button class="btn-ghost" onclick="prevPage()" id="btnPrev">←</button>
+    <span id="pageInfo" style="color:#8b949e;font-size:14px"></span>
+    <button class="btn-ghost" onclick="nextPage()" id="btnNext">→</button>
     <button class="btn-ghost" onclick="testConn()">Тест</button>
     <button class="btn-ghost" onclick="testWrite()">Тест запись</button>
     <span id="status" class="status"></span>
@@ -54,6 +57,8 @@ input[name=newdb]{padding:8px 12px;border:1px solid #30363d;border-radius:6px;ba
 <script>
 const base='{baseUrl}';
 let currentDb='';
+let pageOffset=0;
+const pageLimit=100;
 
 function openImageInNewWindow(id){
   window.open(base+'/api/db/image/'+id+'?db='+encodeURIComponent(currentDb),'_blank');
@@ -73,20 +78,29 @@ async function loadDbs(){
 
 async function onDbChange(){
   currentDb=document.getElementById('dbSelect').value;
+  pageOffset=0;
   if(currentDb) load();
   else document.getElementById('tbody').innerHTML='<tr><td colspan=8 class=empty>Выберите БД</td></tr>';
 }
+
+function prevPage(){ if(pageOffset<=0)return; pageOffset=Math.max(0,pageOffset-pageLimit); load(); }
+function nextPage(){ pageOffset+=pageLimit; load(); }
 
 async function load(){
   if(!currentDb){document.getElementById('status').textContent='Выберите БД';document.getElementById('status').className='status err';return}
   const tbody=document.getElementById('tbody');
   tbody.innerHTML='<tr><td colspan=8>Загрузка...</td></tr>';
   try{
-    const r=await fetch(base+'/api/db/records?db='+encodeURIComponent(currentDb)+'&limit=200');
+    const r=await fetch(base+'/api/db/records?db='+encodeURIComponent(currentDb)+'&limit='+pageLimit+'&offset='+pageOffset);
     const j=await r.json();
     if(j.message){
       tbody.innerHTML='<tr><td colspan=8 class=empty>'+j.message+'</td></tr>';
       return;
+    }
+    const total=j.total||0;
+    if(pageOffset>0 && (!j.records||j.records.length===0) && total>0){
+      pageOffset=Math.max(0, pageOffset-pageLimit);
+      return load();
     }
     let html='';
     for(const row of j.records||[]){
@@ -95,7 +109,12 @@ async function load(){
       html+='<tr><td>'+row.s_INCKEY+'</td><td>'+escapeHtml(row.s_DEVICEID||'')+'</td><td>'+dt+'</td><td>'+escapeHtml(row.s_NOTICE||'')+'</td><td>'+(row.s_LATITUDE??'')+'</td><td>'+(row.s_LONGITUDE??'')+'</td><td>'+foto+'</td><td class=row-actions><button class="btn-ghost btn-danger" onclick="delRecord('+row.s_INCKEY+')" title="Удалить">✕</button></td></tr>';
     }
     tbody.innerHTML=html||'<tr><td colspan=8 class=empty>Нет записей</td></tr>';
-    document.getElementById('status').textContent='Загружено: '+(j.records?.length||0);
+    const from=total===0?0:pageOffset+1;
+    const to=pageOffset+(j.records?.length||0);
+    document.getElementById('pageInfo').textContent=total? (from+'-'+to+' / '+total) : '';
+    document.getElementById('btnPrev').disabled=pageOffset<=0;
+    document.getElementById('btnNext').disabled=pageOffset+pageLimit>=total;
+    document.getElementById('status').textContent='Страница: '+(j.records?.length||0)+' из '+total+' (SQL FIRST/SKIP)';
     document.getElementById('status').className='status ok';
   }catch(e){
     tbody.innerHTML='<tr><td colspan=8 class=empty>Ошибка: '+escapeHtml(e.message)+'</td></tr>';

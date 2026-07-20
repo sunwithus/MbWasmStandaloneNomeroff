@@ -20,13 +20,17 @@ public static class InterbaseServiceCollectionExtensions
         services.AddSingleton(new DbManager(dbFolder, archivePath));
 
         var defaultConnStr = config["Interbase:ConnectionString"] ?? "";
+        var generatorName = config["Interbase:GeneratorName"] ?? NomeroffInterbaseService.DefaultGeneratorName;
         services.AddSingleton(sp =>
         {
             var logger = sp.GetService<ILoggerFactory>()?.CreateLogger("NomeroffInterbase");
-            return new NomeroffInterbaseService(defaultConnStr, logger);
+            return new NomeroffInterbaseService(defaultConnStr, logger, generatorName);
         });
         return services;
     }
+
+    internal static NomeroffInterbaseService CreateService(string connStr, ILogger logger, IConfiguration config) =>
+        new(connStr, logger, config["Interbase:GeneratorName"] ?? NomeroffInterbaseService.DefaultGeneratorName);
 }
 
 public static class InterbaseEndpointExtensions
@@ -62,7 +66,7 @@ public static class InterbaseEndpointExtensions
                 req.Latitude, req.Longitude);
 
             var connStr = GetConnectionString(req.Db, dbManager, config);
-            var service = new NomeroffInterbaseService(connStr, logger);
+            var service = InterbaseServiceCollectionExtensions.CreateService(connStr, logger, config);
             if (!service.IsConfigured)
             {
                 logger.LogWarning("/api/records: БД не настроена, connStr пуст");
@@ -140,9 +144,10 @@ public static class InterbaseEndpointExtensions
 
             var deviceId = req.DeviceId ?? config["Interbase:DefaultDeviceId"] ?? Environment.MachineName;
             var carNumber = PlateAlphabet.LatinToCyrillic(req.CarNumber);
-            logger.LogInformation("/api/records: вызов SaveRecordAsync: deviceId={DeviceId}, carNumber={CarNumber}, lat={Lat}, lon={Lon}, imageSize={Size}",
-                deviceId, carNumber, lat, lon, screenshotBlob?.Length ?? 0);
-            var id = await service.SaveRecordAsync(deviceId, carNumber, lat, lon, screenshotBlob);
+            logger.LogInformation(
+                "/api/records: вызов SaveRecordAsync: deviceId={DeviceId}, carNumber={CarNumber}, lat={Lat}, lon={Lon}, imageSize={Size}, timeUtc={TimeUtc}",
+                deviceId, carNumber, lat, lon, screenshotBlob?.Length ?? 0, req.TimeUtc);
+            var id = await service.SaveRecordAsync(deviceId, carNumber, lat, lon, screenshotBlob, timeUtc: req.TimeUtc);
             logger.LogInformation("/api/records: запись сохранена, id={Id}", id);
             return Results.Ok(new { id });
         });
@@ -175,7 +180,9 @@ public static class InterbaseEndpointExtensions
         {
             var logger = loggerFactory.CreateLogger("NomeroffInterbase");
             var connStr = GetConnectionString(db, dbManager, config);
-            var service = string.IsNullOrEmpty(db) ? defaultService : new NomeroffInterbaseService(connStr, logger);
+            var service = string.IsNullOrEmpty(db)
+                ? defaultService
+                : InterbaseServiceCollectionExtensions.CreateService(connStr, logger, config);
             if (!service.IsConfigured)
                 return Results.Ok(new { success = false, message = "Выберите БД или настройте Interbase:ConnectionString." });
             var (success, message) = await service.TestConnectionAsync();
@@ -187,7 +194,9 @@ public static class InterbaseEndpointExtensions
             var logger = loggerFactory.CreateLogger("NomeroffInterbase");
             logger.LogInformation("test-write: db={Db}, withImage={WithImage}", db, withImage);
             var connStr = GetConnectionString(db, dbManager, config);
-            var service = string.IsNullOrEmpty(db) ? defaultService : new NomeroffInterbaseService(connStr, logger);
+            var service = string.IsNullOrEmpty(db)
+                ? defaultService
+                : InterbaseServiceCollectionExtensions.CreateService(connStr, logger, config);
             if (!service.IsConfigured)
                 return Results.Problem("Выберите БД.");
             try
@@ -206,7 +215,7 @@ public static class InterbaseEndpointExtensions
                         testImage = Convert.FromBase64String("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBEQACEQD/ALH/2Q==");
                     }
                 }
-                var id = await service.SaveRecordAsync("TEST_DEVICE", "А123БГ125", 55.7558, 37.6173, testImage);
+                var id = await service.SaveRecordAsync("TEST_DEVICE", "А123ВС45", 55.7558, 37.6173, testImage);
                 return Results.Ok(new { success = true, id });
             }
             catch (Exception ex)
@@ -221,13 +230,23 @@ public static class InterbaseEndpointExtensions
             var logger = loggerFactory.CreateLogger("NomeroffInterbase");
             logger.LogInformation("api/db/records: db={Db}, limit={Limit}, offset={Offset}", db, limit, offset);
             var connStr = GetConnectionString(db, dbManager, config);
-            var service = string.IsNullOrEmpty(db) ? defaultService : new NomeroffInterbaseService(connStr, logger);
+            var service = string.IsNullOrEmpty(db)
+                ? defaultService
+                : InterbaseServiceCollectionExtensions.CreateService(connStr, logger, config);
             if (!service.IsConfigured)
-                return Results.Ok(new { records = Array.Empty<object>(), message = "Выберите БД." });
+                return Results.Ok(new { records = Array.Empty<object>(), total = 0, message = "Выберите БД." });
             var l = limit ?? 100;
             var o = offset ?? 0;
-            var records = await service.GetRecordsAsync(l, o);
-            return Results.Ok(new { records });
+            try
+            {
+                var (records, total) = await service.GetRecordsPageAsync(l, o);
+                return Results.Ok(new { records, total, limit = l, offset = o });
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "api/db/records failed");
+                return Results.Problem(detail: ex.Message, statusCode: 500);
+            }
         });
 
         app.MapDelete("/api/db/records/{id:long}", async (long id, string? db, NomeroffInterbaseService defaultService, DbManager dbManager, IConfiguration config, ILoggerFactory loggerFactory) =>
@@ -235,7 +254,9 @@ public static class InterbaseEndpointExtensions
             var logger = loggerFactory.CreateLogger("NomeroffInterbase");
             logger.LogInformation("api/db/records DELETE: id={Id}, db={Db}", id, db);
             var connStr = GetConnectionString(db, dbManager, config);
-            var service = string.IsNullOrEmpty(db) ? defaultService : new NomeroffInterbaseService(connStr, logger);
+            var service = string.IsNullOrEmpty(db)
+                ? defaultService
+                : InterbaseServiceCollectionExtensions.CreateService(connStr, logger, config);
             if (!service.IsConfigured)
                 return Results.Problem("Выберите БД.");
             var ok = await service.DeleteRecordAsync(id);
@@ -246,7 +267,9 @@ public static class InterbaseEndpointExtensions
         {
             var logger = loggerFactory.CreateLogger("NomeroffInterbase");
             var connStr = GetConnectionString(db, dbManager, config);
-            var service = string.IsNullOrEmpty(db) ? defaultService : new NomeroffInterbaseService(connStr, logger);
+            var service = string.IsNullOrEmpty(db)
+                ? defaultService
+                : InterbaseServiceCollectionExtensions.CreateService(connStr, logger, config);
             if (!service.IsConfigured)
                 return Results.NotFound();
             var bytes = await service.GetImageAsync(id);

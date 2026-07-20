@@ -1,11 +1,13 @@
 using System.Text.Json;
 using Microsoft.JSInterop;
+using Microsoft.Extensions.Configuration;
 
 namespace MbWebApp.Services;
 
 public class SettingsService
 {
     private readonly ILogger<SettingsService>? _logger;
+    private readonly IConfiguration _configuration;
     private const string KeyApiBaseUrl = "NomeroffApiBaseUrl";
     private const string KeyDeviceName = "NomeroffDeviceName";
     private const string KeyGpsPort = "NomeroffGpsPort";
@@ -21,21 +23,31 @@ public class SettingsService
     private const string KeyCurrentDbDate = "NomeroffCurrentDbDate";
     private const string KeyVideoApiBaseUrl = "NomeroffVideoApiBaseUrl";
 
-    private const string DefaultApiBaseUrl = "http://127.0.0.1:8000";
-    // GPS / Interbase / Video влиты в MbWebApp (:5555); Python OCR остаётся :8000
-    private const string DefaultRecordsApiBaseUrl = "http://localhost:5555";
-    private const string DefaultGpsApiBaseUrl = "http://localhost:5555";
-    private const string DefaultVideoApiBaseUrl = "http://localhost:5555";
+    private readonly string DefaultApiBaseUrl;
+    private readonly string DefaultRecordsApiBaseUrl;
+    private readonly string DefaultGpsApiBaseUrl;
+    private readonly string DefaultVideoApiBaseUrl;
     private const int DefaultCaptureIntervalMs = 1500;
     private const int DefaultDedupIntervalSec = 300;
 
     private readonly IJSRuntime _js;
     private string? _cachedApiBaseUrl;
 
-    public SettingsService(IJSRuntime js, ILogger<SettingsService>? logger = null)
+    public SettingsService(IJSRuntime js, IConfiguration configuration, ILogger<SettingsService>? logger = null)
     {
         _js = js;
+        _configuration = configuration;
         _logger = logger;
+        // Серверные дефолты из appsettings / env; localStorage перекрывает при наличии
+        var urls = configuration["Urls"] ?? "http://localhost:5555";
+        var hostHint = urls.Contains("0.0.0.0")
+            ? urls.Replace("0.0.0.0", "localhost")
+            : urls;
+        hostHint = hostHint.TrimEnd('/');
+        DefaultApiBaseUrl = (configuration["NomeroffApiBaseUrl"] ?? "http://127.0.0.1:8000").TrimEnd('/');
+        DefaultRecordsApiBaseUrl = hostHint;
+        DefaultGpsApiBaseUrl = hostHint;
+        DefaultVideoApiBaseUrl = hostHint;
     }
 
     private const string KeySaveVideoToDb = "NomeroffSaveVideoToDb";

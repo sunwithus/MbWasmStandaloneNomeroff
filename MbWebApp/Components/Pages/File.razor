@@ -6,6 +6,7 @@
 @inject VideoResultProcessor VideoProcessor
 @inject ISnackbar Snackbar
 @inject ILogger<File> Logger
+@inject IConfiguration Config
 @using MbWebApp.Services
 
 <PageTitle>Файл - изображение или видео</PageTitle>
@@ -366,9 +367,10 @@
     {
         if (await SettingsSvc.GetSkipSaveWithoutGpsAsync())
             return;
+        var minConf = Config.GetValue("PlateMinConfidence", 0.70);
         var timeUtc = DateTime.UtcNow.ToString("O");
         var deviceName = await SettingsSvc.GetDeviceNameAsync();
-        foreach (var p in response.Plates.Where(x => !x.IsDuplicate))
+        foreach (var p in response.Plates.Where(x => !x.IsDuplicate && x.Confidence >= minConf))
         {
             var dbName = await Records.GetOrCreateCurrentDbAsync();
             var saved = await Records.SaveRecordAsync(new RecordDto

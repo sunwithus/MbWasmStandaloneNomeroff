@@ -22,6 +22,8 @@ public sealed class VideoProcessSummary
     public int UniquePlates { get; set; }
     public int GpsFrames { get; set; }
     public int SavedWithGps { get; set; }
+    public int SaveAttempts { get; set; }
+    public int SaveFailures { get; set; }
 }
 
 public sealed class VideoResultProcessOutcome
@@ -43,6 +45,21 @@ public sealed class VideoResultProcessRequest
     public IProgress<(int current, int total, string message)>? Progress { get; set; }
 }
 
+internal sealed class PendingStemSave
+{
+    public string Plate = "";
+    public double TimeSec;
+    public double? Lat;
+    public double? Lon;
+    public string? TimeUtc;
+    public string? ImageBase64;
+    public bool HasGps;
+}
+
+/// <summary>
+/// Сохранение в БД по стволу номера: за проезд пишем одно лучшее чтение
+/// (длиннее регион предпочтительнее, иначе последнее), без привязки к скорости.
+/// </summary>
 public class VideoResultProcessor
 {
     private readonly RecordsService _records;
@@ -60,7 +77,6 @@ public class VideoResultProcessor
     {
         var api = req.ApiResponse;
         var outcome = new VideoResultProcessOutcome();
-        var dedupCache = new Dictionary<string, VideoPlateDedupState>(StringComparer.Ordinal);
         var watchSet = req.Watchlist
             .Select(PlateAlphabet.Normalize)
             .Where(s => !string.IsNullOrEmpty(s))
@@ -69,7 +85,7 @@ public class VideoResultProcessor
         double? lastLat = null;
         double? lastLon = null;
         string? lastOverlayTimeUtc = null;
-        var savedWithGps = 0;
+        var pending = new Dictionary<string, PendingStemSave>(StringComparer.Ordinal);
         var totalFrames = Math.Max(api.Results.Count, 1);
         var frameNo = 0;
 
@@ -79,7 +95,7 @@ public class VideoResultProcessor
             frameNo++;
             req.Progress?.Report((frameNo, totalFrames,
                 req.SaveToDb
-                    ? $"Обработка кадров и сохранение в БД: {frameNo} / {totalFrames}"
+                    ? $"Разбор кадров: {frameNo} / {totalFrames}"
                     : $"Обработка кадров: {frameNo} / {totalFrames}"));
 
             if (fr.Latitude.HasValue && fr.Longitude.HasValue)
@@ -92,16 +108,18 @@ public class VideoResultProcessor
 
             var frameLat = fr.Latitude ?? lastLat;
             var frameLon = fr.Longitude ?? lastLon;
+            var hasGps = frameLat.HasValue && frameLon.HasValue;
 
             foreach (var plate in fr.Plates.Where(p => !string.IsNullOrWhiteSpace(p)))
             {
                 var plateNorm = PlateAlphabet.Normalize(plate);
+                if (!PlateAlphabet.LooksLikeRuPlate(plateNorm)
+                    && PlateAlphabet.TryFixMilitaryWithLeadingLetter(plateNorm) is { } mil)
+                    plateNorm = mil;
+
                 var isInWatchlist = watchSet.Contains(plateNorm);
-                var hasGps = frameLat.HasValue && frameLon.HasValue;
-                VideoPlateDedup.TryGetState(dedupCache, plateNorm, out var dedupState);
-                var withinDedup = VideoPlateDedup.IsWithinWindow(dedupState, fr.TimeSec, req.DedupIntervalSec);
-                var isDup = VideoPlateDedup.IsDuplicateForDisplay(withinDedup, hasGps, dedupState);
-                VideoPlateDedup.NoteSighting(dedupCache, plateNorm, fr.TimeSec);
+                var stem = PlateAlphabet.DedupStem(plateNorm);
+                var isDup = pending.ContainsKey(stem);
 
                 outcome.Hits.Add(new VideoPlateHit
                 {
@@ -116,10 +134,8 @@ public class VideoResultProcessor
                 if (isInWatchlist && !isDup)
                     outcome.WatchlistAlerts.Add($"{plateNorm} (@{fr.TimeSec:F1}с)");
 
-                if (!VideoPlateDedup.ShouldSave(req.SaveToDb, withinDedup, hasGps, dedupState))
-                    continue;
-                if (req.SkipSaveWithoutGps && !hasGps)
-                    continue;
+                if (!req.SaveToDb) continue;
+                if (req.SkipSaveWithoutGps && !hasGps) continue;
 
                 var timeUtc = !string.IsNullOrEmpty(fr.OverlayTimeUtc)
                     ? fr.OverlayTimeUtc
@@ -127,26 +143,66 @@ public class VideoResultProcessor
                         ? lastOverlayTimeUtc
                         : DateTime.UtcNow.AddSeconds(-fr.TimeSec).ToString("O");
 
-                var dbName = await _records.GetOrCreateCurrentDbAsync(ct);
+                if (!pending.TryGetValue(stem, out var cur))
+                {
+                    pending[stem] = new PendingStemSave
+                    {
+                        Plate = plateNorm,
+                        TimeSec = fr.TimeSec,
+                        Lat = frameLat,
+                        Lon = frameLon,
+                        TimeUtc = timeUtc,
+                        ImageBase64 = fr.ImageBase64,
+                        HasGps = hasGps
+                    };
+                    continue;
+                }
+
+                // Лучше: длиннее (полный регион) или то же длина — более позднее чтение
+                var take = plateNorm.Length > cur.Plate.Length
+                           || (plateNorm.Length == cur.Plate.Length && fr.TimeSec >= cur.TimeSec);
+                if (!take) continue;
+
+                cur.Plate = plateNorm;
+                cur.TimeSec = fr.TimeSec;
+                cur.Lat = frameLat;
+                cur.Lon = frameLon;
+                cur.TimeUtc = timeUtc;
+                cur.ImageBase64 = fr.ImageBase64;
+                cur.HasGps = hasGps;
+            }
+        }
+
+        var savedWithGps = 0;
+        var saveAttempts = 0;
+        var saveFailures = 0;
+
+        if (req.SaveToDb && pending.Count > 0)
+        {
+            var dbName = await _records.GetOrCreateCurrentDbAsync(ct);
+            var i = 0;
+            foreach (var kv in pending.OrderBy(p => p.Value.TimeSec))
+            {
+                ct.ThrowIfCancellationRequested();
+                i++;
+                req.Progress?.Report((i, pending.Count, $"Сохранение в БД: {i} / {pending.Count}"));
+                var p = kv.Value;
+                saveAttempts++;
                 var dto = new RecordDto
                 {
-                    ScreenshotBase64 = fr.ImageBase64,
-                    Latitude = frameLat,
-                    Longitude = frameLon,
-                    TimeUtc = timeUtc,
-                    CarNumber = plateNorm,
+                    ScreenshotBase64 = p.ImageBase64,
+                    Latitude = p.Lat,
+                    Longitude = p.Lon,
+                    TimeUtc = p.TimeUtc,
+                    CarNumber = p.Plate,
                     DeviceId = string.IsNullOrEmpty(req.DeviceName) ? null : req.DeviceName,
                     Source = req.Source,
                     Db = dbName
                 };
-
                 var saved = await _records.SaveRecordAsync(dto, ct);
-                if (saved && hasGps)
-                {
-                    savedWithGps++;
-                    VideoPlateDedup.MarkSavedWithGps(dedupCache, plateNorm);
-                }
-                _logger.LogInformation("Video save: plate={Plate}, saved={Saved}, gps={HasGps}", plateNorm, saved, hasGps);
+                if (!saved) saveFailures++;
+                else if (p.HasGps) savedWithGps++;
+                _logger.LogInformation("Video save: plate={Plate}, saved={Saved}, gps={HasGps}", p.Plate, saved, p.HasGps);
             }
         }
 
@@ -158,7 +214,9 @@ public class VideoResultProcessor
             TotalPlates = api.Results.Sum(r => r.Plates.Count(p => !string.IsNullOrWhiteSpace(p))),
             UniquePlates = outcome.Hits.Select(v => v.Plate).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
             GpsFrames = api.Results.Count(r => r.Latitude.HasValue && r.Longitude.HasValue),
-            SavedWithGps = savedWithGps
+            SavedWithGps = savedWithGps,
+            SaveAttempts = saveAttempts,
+            SaveFailures = saveFailures
         };
         return outcome;
     }

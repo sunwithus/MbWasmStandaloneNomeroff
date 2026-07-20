@@ -73,4 +73,26 @@ internal static class PlateFramePrep
         image.SaveAsJpeg(ms, Jpeg90);
         return ms.ToArray();
     }
+
+    /// <summary>Лёгкий контраст для тёмных/военных номеров (после ROI или crop).</summary>
+    public static byte[] ContrastBoost(byte[] jpegBytes, float contrast = 1.25f)
+    {
+        if (jpegBytes.Length == 0) return jpegBytes;
+        using var image = Image.Load<Rgb24>(jpegBytes);
+        image.Mutate(x => x.Contrast(contrast).Brightness(1.05f));
+        using var ms = new MemoryStream();
+        image.SaveAsJpeg(ms, Jpeg90);
+        return ms.ToArray();
+    }
+
+    /// <summary>Негатив — военные номера (белый на чёрном / чёрный на белом).</summary>
+    public static byte[] Invert(byte[] jpegBytes)
+    {
+        if (jpegBytes.Length == 0) return jpegBytes;
+        using var image = Image.Load<Rgb24>(jpegBytes);
+        image.Mutate(x => x.Invert());
+        using var ms = new MemoryStream();
+        image.SaveAsJpeg(ms, Jpeg90);
+        return ms.ToArray();
+    }
 }

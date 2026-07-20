@@ -6,6 +6,7 @@
 @inject ISnackbar Snackbar
 @inject IJSRuntime JS
 @inject ILogger<Camera> Logger
+@inject IConfiguration Config
 @implements IAsyncDisposable
 @implements IRecognitionRunner
 
@@ -290,10 +291,11 @@
         if (skipWithoutGps && (!lat.HasValue || !lon.HasValue))
             return;
 
+        var minConf = Config.GetValue("PlateMinConfidence", 0.70);
         var timeUtc = DateTime.UtcNow.ToString("O");
         var deviceName = await Settings.GetDeviceNameAsync();
         var dbName = await Records.GetOrCreateCurrentDbAsync();
-        foreach (var p in response.Plates.Where(x => !x.IsDuplicate))
+        foreach (var p in response.Plates.Where(x => !x.IsDuplicate && x.Confidence >= minConf))
         {
             var dto = new RecordDto
             {

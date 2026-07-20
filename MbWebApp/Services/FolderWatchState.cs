@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Configuration;
 
 namespace MbWebApp.Services;
 
@@ -23,6 +24,8 @@ public sealed class FolderWatchConfig
     public List<string> Watchlist { get; set; } = new();
     public int PollSeconds { get; set; } = 5;
     public int StableSeconds { get; set; } = 2;
+    /// <summary>Подпапка watch-folder (или абсолютный путь) для disk-queue при сбоях OCR/IB.</summary>
+    public string DiskQueueSubfolder { get; set; } = "_disk_queue";
 }
 
 public sealed class FolderWatchLogEntry
@@ -46,25 +49,28 @@ public sealed class FolderWatchStatusDto
     public FolderWatchConfig Config { get; set; } = new();
     public List<FolderWatchLogEntry> Log { get; set; } = new();
     public string? LastResultSummary { get; set; }
+    public int DiskQueueCount { get; set; }
 }
 
-/// <summary>Потокобезопасное состояние папки + config на диске (folder-watch.json).</summary>
+/// <summary>Потокобезопасное состояние папки + config (appsettings/env → folder-watch.json).</summary>
 public sealed class FolderWatchState
 {
     private readonly object _lock = new();
     private readonly string _configPath;
     private readonly ILogger<FolderWatchState> _logger;
+    private readonly IConfiguration _configuration;
     private FolderWatchConfig _config = new();
     private readonly Queue<string> _queue = new();
     private readonly HashSet<string> _queued = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<FolderWatchLogEntry> _log = new();
     private const int MaxLog = 80;
 
-    public FolderWatchState(ILogger<FolderWatchState> logger)
+    public FolderWatchState(ILogger<FolderWatchState> logger, IConfiguration configuration)
     {
         _logger = logger;
+        _configuration = configuration;
         _configPath = Path.Combine(AppContext.BaseDirectory, "folder-watch.json");
-        LoadFromDisk();
+        LoadFromDiskOrAppsettings();
     }
 
     public event Action? Changed;
@@ -94,6 +100,8 @@ public sealed class FolderWatchState
             _config.StableSeconds = Math.Clamp(_config.StableSeconds, 1, 30);
             if (string.IsNullOrWhiteSpace(_config.MoveSubfolder))
                 _config.MoveSubfolder = "Processed";
+            if (string.IsNullOrWhiteSpace(_config.DiskQueueSubfolder))
+                _config.DiskQueueSubfolder = "_disk_queue";
             PersistLocked();
         }
         Notify();
@@ -122,6 +130,11 @@ public sealed class FolderWatchState
             if (_queued.Contains(full)) return;
             if (!IsVideoFile(full)) return;
             if (IsInProcessedFolder(full, _config)) return;
+            // disk-queue files подхватываются отдельно
+            var dq = Path.GetFullPath(Path.Combine(_config.WatchFolder,
+                string.IsNullOrWhiteSpace(_config.DiskQueueSubfolder) ? "_disk_queue" : _config.DiskQueueSubfolder));
+            if (full.StartsWith(dq + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                return;
             _queued.Add(full);
             _queue.Enqueue(full);
             AddLogLocked("info", $"В очередь: {Path.GetFileName(full)}");
@@ -236,25 +249,56 @@ public sealed class FolderWatchState
                || string.Equals(Path.GetDirectoryName(full), processed, StringComparison.OrdinalIgnoreCase);
     }
 
-    private void LoadFromDisk()
+    private void LoadFromDiskOrAppsettings()
     {
         try
         {
-            if (!File.Exists(_configPath)) return;
-            var json = File.ReadAllText(_configPath);
-            var cfg = JsonSerializer.Deserialize<FolderWatchConfig>(json, JsonReadOpts);
-            if (cfg != null) _config = cfg;
+            if (File.Exists(_configPath))
+            {
+                var json = File.ReadAllText(_configPath);
+                var cfg = JsonSerializer.Deserialize<FolderWatchConfig>(json, JsonReadOpts);
+                if (cfg != null)
+                {
+                    _config = cfg;
+                    EnsureDiskQueueDefaults(_config);
+                    return;
+                }
+            }
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Не удалось прочитать {Path}", _configPath);
         }
+
+        _config = BindFromAppsettings();
+        PersistLocked();
+        _logger.LogInformation("FolderWatch: конфиг из appsettings/env → {Path}", _configPath);
+    }
+
+    private FolderWatchConfig BindFromAppsettings()
+    {
+        var section = _configuration.GetSection("FolderWatch");
+        var cfg = new FolderWatchConfig();
+        section.Bind(cfg);
+        if (string.IsNullOrWhiteSpace(cfg.WatchFolder))
+            cfg.WatchFolder = @"D:\REG_VIDEO";
+        EnsureDiskQueueDefaults(cfg);
+        return cfg;
+    }
+
+    private static void EnsureDiskQueueDefaults(FolderWatchConfig cfg)
+    {
+        if (string.IsNullOrWhiteSpace(cfg.DiskQueueSubfolder))
+            cfg.DiskQueueSubfolder = "_disk_queue";
+        if (string.IsNullOrWhiteSpace(cfg.MoveSubfolder))
+            cfg.MoveSubfolder = "Processed";
     }
 
     private void PersistLocked()
     {
         try
         {
+            EnsureDiskQueueDefaults(_config);
             var json = JsonSerializer.Serialize(_config, JsonWriteOpts);
             File.WriteAllText(_configPath, json);
         }
@@ -288,7 +332,8 @@ public sealed class FolderWatchState
         DeviceName = c.DeviceName ?? "",
         Watchlist = c.Watchlist?.ToList() ?? new List<string>(),
         PollSeconds = c.PollSeconds,
-        StableSeconds = c.StableSeconds
+        StableSeconds = c.StableSeconds,
+        DiskQueueSubfolder = string.IsNullOrWhiteSpace(c.DiskQueueSubfolder) ? "_disk_queue" : c.DiskQueueSubfolder
     };
 
     private static readonly JsonSerializerOptions JsonReadOpts = new()

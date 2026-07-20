@@ -1,49 +1,37 @@
 using InterBaseSql.Data.InterBaseClient;
 using Microsoft.Extensions.Logging;
 using System.Data;
-using System.Data.Common;
+using System.Globalization;
 using System.Text;
-using System.Transactions;
+using System.Text.RegularExpressions;
 
 namespace Nomeroff.Interbase.Api.Interbase;
 
 /// <summary>
 /// Сервис для записи распознанных номеров в Interbase.
-///
-/// Структура таблиц:
-///
-/// SPR_SPEECH_TABLE — основная таблица сеансов (регистраций):
-///   S_INCKEY      BIGINT      — идентификатор (первичный ключ)
-///   S_DEVICEID    VARCHAR     — имя устройства
-///   S_DATETIME    TIMESTAMP   — дата регистрации
-///   S_NOTICE      VARCHAR     — номер автомобиля
-///   S_TYPE, S_PRELOOKED и др. — дополнительные поля
-///
-/// SPR_SP_GEO_TABLE — геоданные сеанса (GPS):
-///   S_INCKEY      BIGINT      — ссылка на SPR_SPEECH_TABLE
-///   S_LATITUDE    DOUBLE PRECISION — широта (X), градусы
-///   S_LONGITUDE   DOUBLE PRECISION — долгота (Y), градусы
-///
-/// SPR_SP_FOTO_TABLE — фотоснимки сеанса (скриншот при распознавании):
-///   S_INCKEY      BIGINT      — ссылка на SPR_SPEECH_TABLE
-///   F_IMAGE       BLOB        — снимок (изображение)
+/// ID через GENERATOR; S_DATETIME из time_utc (fallback Now); пагинация FIRST/SKIP.
 /// </summary>
 public class NomeroffInterbaseService
 {
+    public const string DefaultGeneratorName = "GEN_SPR_SPEECH_INCKEY";
+
     private readonly string _connectionString;
     private readonly ILogger? _logger;
+    private readonly string _generatorName;
+    private static readonly HashSet<string> EnsuredGenerators = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object GeneratorLock = new();
 
     public bool IsConfigured => !string.IsNullOrWhiteSpace(_connectionString);
 
-    public NomeroffInterbaseService(string? connectionString, ILogger? logger = null)
+    public NomeroffInterbaseService(string? connectionString, ILogger? logger = null, string? generatorName = null)
     {
         _connectionString = connectionString ?? "";
         _logger = logger;
+        _generatorName = string.IsNullOrWhiteSpace(generatorName) ? DefaultGeneratorName : generatorName.Trim();
     }
 
-    /// <summary>Создать экземпляр с указанной строкой подключения.</summary>
     public NomeroffInterbaseService WithConnection(string connectionString) =>
-        new NomeroffInterbaseService(connectionString, _logger);
+        new NomeroffInterbaseService(connectionString, _logger, _generatorName);
 
     private static IBConnection GetConnection(string connectionString)
     {
@@ -75,22 +63,122 @@ public class NomeroffInterbaseService
         }
     }
 
+    /// <summary>Разобрать time_utc (ISO) → локальный DateTime для S_DATETIME; иначе DateTime.Now.</summary>
+    public static DateTime ResolveDateTime(string? timeUtc)
+    {
+        if (string.IsNullOrWhiteSpace(timeUtc))
+            return DateTime.Now;
+
+        if (DateTimeOffset.TryParse(timeUtc, CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind, out var dto))
+            return dto.ToLocalTime().DateTime;
+
+        if (DateTime.TryParse(timeUtc, CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind, out var dt))
+        {
+            if (dt.Kind == DateTimeKind.Utc)
+                return dt.ToLocalTime();
+            if (dt.Kind == DateTimeKind.Unspecified)
+                return DateTime.SpecifyKind(dt, DateTimeKind.Utc).ToLocalTime();
+            return dt;
+        }
+
+        return DateTime.Now;
+    }
+
+    private async Task EnsureGeneratorAsync(IBConnection conn, CancellationToken ct)
+    {
+        var cacheKey = _connectionString + "|" + _generatorName;
+        lock (GeneratorLock)
+        {
+            if (EnsuredGenerators.Contains(cacheKey))
+                return;
+        }
+
+        // Проверка/создание генератора без TRIM/@ (старый InterBase)
+        var genNameUpper = _generatorName.ToUpperInvariant();
+        if (!Regex.IsMatch(genNameUpper, @"^[A-Z][A-Z0-9_]*$"))
+            throw new InvalidOperationException($"Некорректное имя GENERATOR: {_generatorName}");
+
+        var exists = false;
+        using (var listCmd = new IBCommand("SELECT RDB$GENERATOR_NAME FROM RDB$GENERATORS", conn))
+        {
+            await using var reader = await listCmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var name = reader.GetString(0)?.Trim() ?? "";
+                if (string.Equals(name, genNameUpper, StringComparison.OrdinalIgnoreCase))
+                {
+                    exists = true;
+                    break;
+                }
+            }
+        }
+
+        if (!exists)
+        {
+            try
+            {
+                using var create = new IBCommand($"CREATE GENERATOR {_generatorName}", conn);
+                await create.ExecuteNonQueryAsync(ct);
+                _logger?.LogInformation("Создан GENERATOR {Name}", _generatorName);
+            }
+            catch (Exception ex) when (ex.Message.Contains("already", StringComparison.OrdinalIgnoreCase)
+                                       || ex.Message.Contains("exist", StringComparison.OrdinalIgnoreCase)
+                                       || ex.Message.Contains("уже", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger?.LogDebug(ex, "GENERATOR {Name} уже есть", _generatorName);
+            }
+        }
+
+        // Выровнять значение генератора не ниже MAX(S_INCKEY)
+        long maxKey = 0;
+        using (var maxCmd = new IBCommand("SELECT MAX(S_INCKEY) FROM SPR_SPEECH_TABLE", conn))
+        {
+            var r = await maxCmd.ExecuteScalarAsync(ct);
+            if (r != null && r != DBNull.Value)
+                maxKey = Convert.ToInt64(r);
+        }
+
+        long genVal = 0;
+        using (var genCmd = new IBCommand($"SELECT GEN_ID({_generatorName}, 0) FROM RDB$DATABASE", conn))
+        {
+            var r = await genCmd.ExecuteScalarAsync(ct);
+            if (r != null && r != DBNull.Value)
+                genVal = Convert.ToInt64(r);
+        }
+
+        if (genVal < maxKey)
+        {
+            using var setCmd = new IBCommand($"SET GENERATOR {_generatorName} TO {maxKey}", conn);
+            await setCmd.ExecuteNonQueryAsync(ct);
+            _logger?.LogInformation("GENERATOR {Name} выровнен до {Max}", _generatorName, maxKey);
+        }
+
+        lock (GeneratorLock)
+            EnsuredGenerators.Add(cacheKey);
+    }
+
+    private async Task<long> NextKeyAsync(IBConnection conn, IBTransaction transaction, CancellationToken ct)
+    {
+        using var cmd = new IBCommand($"SELECT GEN_ID({_generatorName}, 1) FROM RDB$DATABASE", conn, transaction);
+        var r = await cmd.ExecuteScalarAsync(ct);
+        return Convert.ToInt64(r);
+    }
+
     /// <summary>Сохранить запись о распознанном номере.</summary>
-    /// <param name="deviceId">Имя устройства (S_DEVICEID)</param>
-    /// <param name="notice">Номер автомобиля (S_NOTICE)</param>
-    /// <param name="latitude">Широта (S_LATITUDE) или null</param>
-    /// <param name="longitude">Долгота (S_LONGITUDE) или null</param>
-    /// <param name="screenshotBlob">Скриншот (F_IMAGE) или null</param>
     public async Task<long> SaveRecordAsync(
         string deviceId,
         string notice,
         double? latitude,
         double? longitude,
         byte[]? screenshotBlob,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? timeUtc = null)
     {
-        _logger?.LogInformation("SaveRecordAsync: deviceId={DeviceId}, notice={Notice}, hasCoords={HasCoords}, imageLen={ImageLen}",
-            deviceId, notice, latitude.HasValue && longitude.HasValue, screenshotBlob?.Length ?? 0);
+        _logger?.LogInformation(
+            "SaveRecordAsync: deviceId={DeviceId}, notice={Notice}, hasCoords={HasCoords}, imageLen={ImageLen}, timeUtc={TimeUtc}",
+            deviceId, notice, latitude.HasValue && longitude.HasValue, screenshotBlob?.Length ?? 0, timeUtc);
         if (string.IsNullOrWhiteSpace(_connectionString))
         {
             _logger?.LogWarning("SaveRecordAsync: Interbase не настроен.");
@@ -101,32 +189,18 @@ public class NomeroffInterbaseService
         try
         {
             conn = GetConnection(_connectionString);
-            long newKey;
-            var maxKeySql = "SELECT MAX(S_INCKEY) FROM SPR_SPEECH_TABLE";
+            await EnsureGeneratorAsync(conn, ct);
 
+            long newKey;
             using (var transaction = conn.BeginTransaction())
             {
-                using (var command = new IBCommand(maxKeySql, conn, transaction))
-                {
-                    var maxKey = await command.ExecuteScalarAsync(ct);
-                    long maxKeyLong;
-                    if (maxKey == null || maxKey == DBNull.Value)
-                    {
-                        maxKeyLong = 0;
-                    }
-                    else
-                    {
-                        maxKeyLong = Convert.ToInt64(maxKey);
-                    }
-                    newKey = maxKeyLong + 1;
-                }
-                _logger?.LogInformation("SaveRecordAsync: newKey={NewKey} (MAX+1)", newKey);
+                newKey = await NextKeyAsync(conn, transaction, ct);
+                _logger?.LogInformation("SaveRecordAsync: newKey={NewKey} (GENERATOR)", newKey);
 
-                var now = DateTime.Now;
+                var when = ResolveDateTime(timeUtc);
                 var deviceIdWin = ToWin1251(deviceId ?? "NOMEROFF");
                 var noticeWin = ToWin1251(notice ?? "");
-                _logger?.LogDebug("SaveRecordAsync: deviceIdWin len={Len}, noticeWin len={NoticeLen}", deviceIdWin.Length, noticeWin.Length);
-                // 2. INSERT в SPR_SPEECH_TABLE (минимальный набор полей для Nomeroff)
+
                 var sql = @"
             INSERT INTO SPR_SPEECH_TABLE (
                 S_INCKEY, S_TYPE, S_PRELOOKED, S_DATETIME, S_NOTICE, S_DEVICEID, 
@@ -136,14 +210,13 @@ public class NomeroffInterbaseService
                 @S_CALLTYPE, @S_SELSTATUS
             )";
 
-
                 using (var command = new IBCommand(sql, conn, transaction))
                 {
                     command.Parameters.Add("@S_INCKEY", IBDbType.BigInt).Value = newKey;
                     command.Parameters.AddWithValue("@S_TYPE", IBDbType.Integer).Value = 0;
                     command.Parameters.AddWithValue("@S_PRELOOKED", IBDbType.Integer).Value = 0;
                     command.Parameters.AddWithValue("@S_DEVICEID", IBDbType.VarChar).Value = deviceIdWin;
-                    command.Parameters.AddWithValue("@S_DATETIME", IBDbType.TimeStamp).Value = now;
+                    command.Parameters.AddWithValue("@S_DATETIME", IBDbType.TimeStamp).Value = when;
                     command.Parameters.AddWithValue("@S_NOTICE", IBDbType.VarChar).Value = noticeWin;
                     command.Parameters.AddWithValue("@S_CALLTYPE", IBDbType.Integer).Value = 2;
                     command.Parameters.AddWithValue("@S_SELSTATUS", IBDbType.SmallInt).Value = 0;
@@ -151,9 +224,8 @@ public class NomeroffInterbaseService
                     await command.ExecuteNonQueryAsync(ct);
                 }
 
-                _logger?.LogInformation("SaveRecordAsync: SPR_SPEECH_TABLE OK");
+                _logger?.LogInformation("SaveRecordAsync: SPR_SPEECH_TABLE OK, S_DATETIME={When}", when);
 
-                // 3. INSERT в SPR_SP_GEO_TABLE если есть координаты
                 if (latitude.HasValue && longitude.HasValue)
                 {
                     var geoSql = @"
@@ -162,7 +234,7 @@ public class NomeroffInterbaseService
                     using (var cmd = new IBCommand(geoSql, conn, transaction))
                     {
                         cmd.Parameters.Add("@Key", IBDbType.BigInt).Value = newKey;
-                        cmd.Parameters.AddWithValue("@Order", IBDbType.Integer).Value = 0; // !!! Обязательный параметр - без него ошибка записи
+                        cmd.Parameters.AddWithValue("@Order", IBDbType.Integer).Value = 0;
                         cmd.Parameters.AddWithValue("@Lat", IBDbType.Double).Value = latitude.Value;
                         cmd.Parameters.AddWithValue("@Lon", IBDbType.Double).Value = longitude.Value;
                         await cmd.ExecuteNonQueryAsync(ct);
@@ -170,7 +242,6 @@ public class NomeroffInterbaseService
                     _logger?.LogInformation("SaveRecordAsync: SPR_SP_GEO_TABLE OK");
                 }
 
-                // 4. INSERT в SPR_SP_FOTO_TABLE если есть скриншот (независимо от наличия GPS)
                 if (screenshotBlob != null && screenshotBlob.Length > 0)
                 {
                     _logger?.LogInformation("SaveRecordAsync: inserting F_IMAGE, size={Size}", screenshotBlob.Length);
@@ -189,7 +260,6 @@ public class NomeroffInterbaseService
                 transaction.Commit();
                 _logger?.LogInformation("SaveRecordAsync: success, id={Id}", newKey);
                 return newKey;
-
             }
         }
         catch (Exception ex)
@@ -203,17 +273,19 @@ public class NomeroffInterbaseService
         }
     }
 
-    /// <summary>Получить записи из SPR_SPEECH_TABLE с GEO (пагинация в C#).</summary>
-    public async Task<IReadOnlyList<DbRecordDto>> GetRecordsAsync(int limit = 100, int offset = 0, CancellationToken ct = default)
+    /// <summary>Получить записи с пагинацией (совместимо со старым InterBase без FIRST/SKIP).</summary>
+    public async Task<(IReadOnlyList<DbRecordDto> Records, int Total)> GetRecordsPageAsync(
+        int limit = 100,
+        int offset = 0,
+        CancellationToken ct = default)
     {
-        _logger?.LogInformation("GetRecordsAsync: limit={Limit}, offset={Offset} (C# pagination)", limit, offset);
+        _logger?.LogInformation("GetRecordsPageAsync: limit={Limit}, offset={Offset}", limit, offset);
         if (string.IsNullOrWhiteSpace(_connectionString))
         {
-            _logger?.LogWarning("GetRecordsAsync: Interbase не настроен.");
-            return Array.Empty<DbRecordDto>();
+            _logger?.LogWarning("GetRecordsPageAsync: Interbase не настроен.");
+            return (Array.Empty<DbRecordDto>(), 0);
         }
 
-        // Ограничиваем лимит, чтобы не перегрузить память
         limit = Math.Clamp(limit, 1, 500);
         offset = Math.Max(0, offset);
 
@@ -222,78 +294,66 @@ public class NomeroffInterbaseService
         {
             conn = GetConnection(_connectionString);
 
-            // 🔹 Шаг 1: Получаем ВСЕ S_INCKEY в нужном порядке (только ID, это быстро)
-            var allIds = new List<long>();
-            var sqlIds = "SELECT s.S_INCKEY FROM SPR_SPEECH_TABLE s ORDER BY s.S_INCKEY DESC";
-
-            using (var cmd = new IBCommand(sqlIds, conn))
+            int total;
+            using (var countCmd = new IBCommand("SELECT COUNT(*) FROM SPR_SPEECH_TABLE", conn))
             {
-                await using var reader = await cmd.ExecuteReaderAsync(ct);
-                while (await reader.ReadAsync(ct))
-                {
-                    allIds.Add(Convert.ToInt64(reader["S_INCKEY"]));
-                }
+                total = Convert.ToInt32(await countCmd.ExecuteScalarAsync(ct) ?? 0);
             }
 
-            // 🔹 Шаг 2: Применяем пагинацию в C#
-            var pageIds = allIds.Skip(offset).Take(limit).ToList();
+            // Старый InterBase: без FIRST/SKIP — берём только ID, режем страницу в C#, детали — по IN.
+            var allIds = new List<long>(Math.Min(total, 50_000));
+            using (var idCmd = new IBCommand("SELECT S_INCKEY FROM SPR_SPEECH_TABLE ORDER BY S_INCKEY DESC", conn))
+            {
+                await using var reader = await idCmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                    allIds.Add(Convert.ToInt64(reader["S_INCKEY"]));
+            }
 
+            var pageIds = allIds.Skip(offset).Take(limit).ToList();
             if (pageIds.Count == 0)
             {
-                _logger?.LogInformation("GetRecordsAsync: нет записей для этой страницы");
-                return Array.Empty<DbRecordDto>();
+                _logger?.LogInformation("GetRecordsPageAsync: пустая страница, total={Total}", total);
+                return (Array.Empty<DbRecordDto>(), total);
             }
 
-            _logger?.LogDebug("GetRecordsAsync: выбрано {Count} ID для загрузки деталей", pageIds.Count);
-
-            // 🔹 Шаг 3: Загружаем полные данные только для нужных ID
-            // InterBase 2009 может иметь лимит на количество элементов в IN (...), поэтому разбиваем на чанки
             const int inChunkSize = 100;
             var result = new List<DbRecordDto>();
-
-            for (int i = 0; i < pageIds.Count; i += inChunkSize)
+            for (var i = 0; i < pageIds.Count; i += inChunkSize)
             {
                 var chunk = pageIds.Skip(i).Take(inChunkSize).ToList();
                 var inClause = string.Join(", ", chunk);
-
                 var sqlData = $@"
-                SELECT s.S_INCKEY, s.S_DEVICEID, s.S_DATETIME, s.S_NOTICE, g.S_LATITUDE, g.S_LONGITUDE
-                FROM SPR_SPEECH_TABLE s
-                LEFT JOIN SPR_SP_GEO_TABLE g ON g.S_INCKEY = s.S_INCKEY
-                WHERE s.S_INCKEY IN ({inClause})
-                ORDER BY s.S_INCKEY DESC";
+SELECT s.S_INCKEY, s.S_DEVICEID, s.S_DATETIME, s.S_NOTICE, g.S_LATITUDE, g.S_LONGITUDE
+FROM SPR_SPEECH_TABLE s
+LEFT JOIN SPR_SP_GEO_TABLE g ON g.S_INCKEY = s.S_INCKEY
+WHERE s.S_INCKEY IN ({inClause})
+ORDER BY s.S_INCKEY DESC";
 
-                using (var cmd = new IBCommand(sqlData, conn))
+                using var cmd = new IBCommand(sqlData, conn);
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
                 {
-                    await using var reader = await cmd.ExecuteReaderAsync(ct);
-                    while (await reader.ReadAsync(ct))
+                    result.Add(new DbRecordDto
                     {
-                        result.Add(new DbRecordDto
-                        {
-                            S_INCKEY = Convert.ToInt64(reader["S_INCKEY"]),
-                            S_DEVICEID = reader["S_DEVICEID"]?.ToString() ?? "",
-                            S_DATETIME = reader["S_DATETIME"] is DBNull ? null : Convert.ToDateTime(reader["S_DATETIME"]),
-                            S_NOTICE = reader["S_NOTICE"]?.ToString() ?? "",
-                            S_LATITUDE = reader["S_LATITUDE"] is DBNull ? null : Convert.ToDouble(reader["S_LATITUDE"]),
-                            S_LONGITUDE = reader["S_LONGITUDE"] is DBNull ? null : Convert.ToDouble(reader["S_LONGITUDE"]),
-                            HasFoto = false // При необходимости можно добавить проверку SPR_SP_FOTO_TABLE
-                        });
-                    }
+                        S_INCKEY = Convert.ToInt64(reader["S_INCKEY"]),
+                        S_DEVICEID = reader["S_DEVICEID"]?.ToString() ?? "",
+                        S_DATETIME = reader["S_DATETIME"] is DBNull ? null : Convert.ToDateTime(reader["S_DATETIME"]),
+                        S_NOTICE = reader["S_NOTICE"]?.ToString() ?? "",
+                        S_LATITUDE = reader["S_LATITUDE"] is DBNull ? null : Convert.ToDouble(reader["S_LATITUDE"]),
+                        S_LONGITUDE = reader["S_LONGITUDE"] is DBNull ? null : Convert.ToDouble(reader["S_LONGITUDE"]),
+                        HasFoto = false
+                    });
                 }
             }
 
-            // 🔹 Шаг 4: Восстанавливаем порядок (на случай, если IN (...) вернул не в том порядке)
-            var orderedResult = result
-                .OrderByDescending(r => r.S_INCKEY)
-                .ToList();
-
-            _logger?.LogInformation("GetRecordsAsync: получено {Count} записей", orderedResult.Count);
-            return orderedResult;
+            var ordered = result.OrderByDescending(r => r.S_INCKEY).ToList();
+            _logger?.LogInformation("GetRecordsPageAsync: page={Count}, total={Total}", ordered.Count, total);
+            return (ordered, total);
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "GetRecordsAsync: ошибка");
-            return Array.Empty<DbRecordDto>();
+            _logger?.LogError(ex, "GetRecordsPageAsync: ошибка");
+            throw;
         }
         finally
         {
@@ -301,7 +361,13 @@ public class NomeroffInterbaseService
         }
     }
 
-    /// <summary>Получить изображение (F_IMAGE) из SPR_SP_FOTO_TABLE по S_INCKEY.</summary>
+    /// <summary>Совместимость: только страница записей.</summary>
+    public async Task<IReadOnlyList<DbRecordDto>> GetRecordsAsync(int limit = 100, int offset = 0, CancellationToken ct = default)
+    {
+        var (records, _) = await GetRecordsPageAsync(limit, offset, ct);
+        return records;
+    }
+
     public async Task<byte[]?> GetImageAsync(long sInckey, CancellationToken ct = default)
     {
         _logger?.LogInformation("GetImageAsync: sInckey={Key}", sInckey);
@@ -340,7 +406,6 @@ public class NomeroffInterbaseService
         }
     }
 
-    /// <summary>Удалить запись по S_INCKEY (из всех связанных таблиц).</summary>
     public async Task<bool> DeleteRecordAsync(long sInckey, CancellationToken ct = default)
     {
         _logger?.LogInformation("DeleteRecordAsync: sInckey={Key}", sInckey);
@@ -361,7 +426,6 @@ public class NomeroffInterbaseService
                     cmd.Parameters.Add("@Key", IBDbType.BigInt).Value = sInckey;
                     await cmd.ExecuteNonQueryAsync(ct);
                 }
-                _logger?.LogDebug("DeleteRecordAsync: {Table} OK", table);
             }
             _logger?.LogInformation("DeleteRecordAsync: success");
             return true;
@@ -390,12 +454,13 @@ public class NomeroffInterbaseService
         try
         {
             conn = GetConnection(_connectionString);
-            using (var cmd = new IBCommand("SELECT MAX(S_INCKEY) FROM SPR_SPEECH_TABLE", conn))
+            await EnsureGeneratorAsync(conn, ct);
+            using (var cmd = new IBCommand($"SELECT GEN_ID({_generatorName}, 0) FROM RDB$DATABASE", conn))
             {
                 var r = await cmd.ExecuteScalarAsync(ct);
-                var maxKey = r != null && r != DBNull.Value ? Convert.ToInt64(r) : 0;
-                _logger?.LogInformation("TestConnectionAsync: OK, MAX(S_INCKEY)={Max}", maxKey);
-                return (true, $"Подключение OK. MAX(S_INCKEY) = {maxKey}");
+                var gen = r != null && r != DBNull.Value ? Convert.ToInt64(r) : 0;
+                _logger?.LogInformation("TestConnectionAsync: OK, GEN={Gen}", gen);
+                return (true, $"Подключение OK. GENERATOR {_generatorName} = {gen}");
             }
         }
         catch (Exception ex)
@@ -410,7 +475,6 @@ public class NomeroffInterbaseService
     }
 }
 
-/// <summary>DTO записи из БД для просмотрщика.</summary>
 public class DbRecordDto
 {
     public long S_INCKEY { get; set; }
@@ -419,6 +483,5 @@ public class DbRecordDto
     public string S_NOTICE { get; set; } = "";
     public double? S_LATITUDE { get; set; }
     public double? S_LONGITUDE { get; set; }
-    /// <summary>Есть ли скриншот в SPR_SP_FOTO_TABLE.</summary>
     public bool HasFoto { get; set; }
 }

@@ -7,9 +7,9 @@ namespace Nomeroff.Video.Api;
 /// <summary>Сжатие кадра перед отдачей в UI/БД (JPEG, опционально уменьшение ширины).</summary>
 internal static class FrameStoragePrep
 {
-    /// <param name="maxWidth">0 = не менять размер</param>
-    /// <param name="jpegQuality">60–92</param>
-    public static byte[] CompressJpeg(byte[] jpegBytes, int maxWidth = 1280, int jpegQuality = 72)
+    /// <param name="maxWidth">0 = не менять размер (оставить как из ffmpeg, обычно 1920)</param>
+    /// <param name="jpegQuality">50–95; для читаемости номера лучше ≥88</param>
+    public static byte[] CompressJpeg(byte[] jpegBytes, int maxWidth = 1920, int jpegQuality = 90)
     {
         if (jpegBytes.Length == 0) return jpegBytes;
         jpegQuality = Math.Clamp(jpegQuality, 50, 95);

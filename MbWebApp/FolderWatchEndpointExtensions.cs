@@ -24,24 +24,35 @@ public static class FolderWatchEndpointExtensions
             return Results.Ok(state.GetConfig());
         });
 
-        g.MapGet("/status", (FolderWatchState state) => Results.Ok(state.Snapshot()));
+        g.MapGet("/status", (FolderWatchState state, FolderDiskQueue diskQueue) =>
+        {
+            var snap = state.Snapshot();
+            snap.DiskQueueCount = diskQueue.Count(snap.Config);
+            return Results.Ok(snap);
+        });
 
-        g.MapPost("/start", (FolderWatchService svc, FolderWatchState state) =>
+        g.MapPost("/start", (FolderWatchService svc, FolderWatchState state, FolderDiskQueue diskQueue) =>
         {
             svc.RequestStart();
-            return Results.Ok(state.Snapshot());
+            var snap = state.Snapshot();
+            snap.DiskQueueCount = diskQueue.Count(snap.Config);
+            return Results.Ok(snap);
         });
 
-        g.MapPost("/stop", (FolderWatchService svc, FolderWatchState state) =>
+        g.MapPost("/stop", (FolderWatchService svc, FolderWatchState state, FolderDiskQueue diskQueue) =>
         {
             svc.RequestStop();
-            return Results.Ok(state.Snapshot());
+            var snap = state.Snapshot();
+            snap.DiskQueueCount = diskQueue.Count(snap.Config);
+            return Results.Ok(snap);
         });
 
-        g.MapPost("/scan", (FolderWatchService svc, FolderWatchState state) =>
+        g.MapPost("/scan", (FolderWatchService svc, FolderWatchState state, FolderDiskQueue diskQueue) =>
         {
             svc.RequestScanOnce();
-            return Results.Ok(state.Snapshot());
+            var snap = state.Snapshot();
+            snap.DiskQueueCount = diskQueue.Count(snap.Config);
+            return Results.Ok(snap);
         });
 
         return app;

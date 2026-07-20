@@ -25,9 +25,21 @@ builder.Services.AddScoped<NomeroffService>();
 builder.Services.AddScoped<RecordsService>();
 builder.Services.AddScoped<VideoResultProcessor>();
 builder.Services.AddScoped<RecognitionStateService>();
+builder.Services.AddSingleton<FolderDiskQueue>();
 builder.Services.AddSingleton<FolderWatchState>();
 builder.Services.AddSingleton<FolderWatchService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<FolderWatchService>());
+
+// Единый конфиг: appsettings + environment variables (MaxVideoFrames, PlateMinConfidence, FolderWatch__*, …)
+builder.Services.Configure<MbWebApp.Options.NomeroffAppOptions>(o =>
+{
+    o.MaxVideoFrames = builder.Configuration.GetValue("MaxVideoFrames", 300);
+    o.PlateMinConfidence = builder.Configuration.GetValue("PlateMinConfidence", 0.70);
+    o.NomeroffApiBaseUrl = builder.Configuration["NomeroffApiBaseUrl"] ?? "http://127.0.0.1:8000";
+    o.MaxVideoUploadBytes = builder.Configuration.GetValue("MaxVideoUploadBytes", 1024L * 1024 * 1024);
+});
+builder.Services.Configure<MbWebApp.Options.FolderWatchOptions>(
+    builder.Configuration.GetSection(MbWebApp.Options.FolderWatchOptions.Section));
 
 builder.Services.AddSignalR(o =>
 {
@@ -77,11 +89,13 @@ app.UseSwaggerUI(c =>
     c.SwaggerEndpoint("/swagger/v1/swagger.json", "MbWebApp API");
 });
 
-app.MapGet("/health", () => Results.Ok(new
+app.MapGet("/health", (IConfiguration config) => Results.Ok(new
 {
     status = "ok",
     modules = new[] { "ui", "gps", "interbase", "video" },
-    pythonHint = app.Configuration["NomeroffApiBaseUrl"] ?? "http://127.0.0.1:8000"
+    pythonHint = config["NomeroffApiBaseUrl"] ?? "http://127.0.0.1:8000",
+    maxVideoFrames = config.GetValue("MaxVideoFrames", 300),
+    plateMinConfidence = config.GetValue("PlateMinConfidence", 0.70)
 }));
 
 app.MapNomeroffGpsEndpoints("/ops/gps");
