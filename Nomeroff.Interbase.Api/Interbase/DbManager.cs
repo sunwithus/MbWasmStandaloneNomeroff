@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using InterBaseSql.Data.InterBaseClient;
+using Microsoft.Extensions.Configuration;
 
 namespace Nomeroff.Interbase.Api.Interbase;
 
@@ -8,14 +9,21 @@ public class DbManager
 {
     private readonly string _dbFolder;
     private readonly string _archivePath;
-    //private const string DefaultConnectionTemplate = "User=SYSDBA;Password=masterkey;Database={0};DataSource=localhost;Port=3050;Dialect=3;Charset=NONE;Role=;Connection lifetime=15;Pooling=true;MinPoolSize=0;MaxPoolSize=50;Packet Size=8192;ServerType=0";
+    private readonly string _dataSource;
+    private readonly int _port;
+    private readonly string _user;
+    private readonly string _password;
+    private readonly string _charset;
 
-    private const string DefaultConnectionTemplate = "User=SYSDBA;Password=masterkey;Database={0};DataSource=localhost;Port=3050;Dialect=3;Charset=WIN1251;Role=;Connection lifetime=15;Pooling=true;MinPoolSize=0;MaxPoolSize=50;Packet Size=8192;ServerType=0";
-
-    public DbManager(string? dbFolder, string? archivePath)
+    public DbManager(string? dbFolder, string? archivePath, IConfiguration? config = null)
     {
         _dbFolder = Path.GetFullPath(dbFolder ?? Path.Combine(AppContext.BaseDirectory, "Examples"));
         _archivePath = Path.GetFullPath(archivePath ?? Path.Combine(AppContext.BaseDirectory, "empty38.zip"));
+        _dataSource = (config?["Interbase:DataSource"] ?? "localhost").Trim();
+        _port = config?.GetValue("Interbase:Port", 3050) ?? 3050;
+        _user = (config?["Interbase:User"] ?? "SYSDBA").Trim();
+        _password = config?["Interbase:Password"] ?? "masterkey";
+        _charset = (config?["Interbase:Charset"] ?? "WIN1251").Trim();
     }
 
     /// <summary>Получить список .IBS файлов в папке БД.</summary>
@@ -32,12 +40,15 @@ public class DbManager
         return files;
     }
 
-    /// <summary>Построить connection string по имени файла БД.</summary>
+    /// <summary>Построить connection string по имени файла БД (хост/порт из appsettings Interbase:*).</summary>
     public string GetConnectionString(string dbFileName)
     {
         var fullPath = Path.Combine(_dbFolder, dbFileName);
-        return string.Format(DefaultConnectionTemplate, fullPath);
+        return $"User={_user};Password={_password};Database={fullPath};DataSource={_dataSource};Port={_port};Dialect=3;Charset={_charset};Role=;Connection lifetime=15;Pooling=true;MinPoolSize=0;MaxPoolSize=50;Packet Size=8192;ServerType=0";
     }
+
+    public string DataSource => _dataSource;
+    public int Port => _port;
 
     /// <summary>Создать новую БД копированием из архива empty38.zip (извлекается EMPTY38.IBS).</summary>
     /// <param name="newFileName">Имя нового файла, например MyDb.IBS</param>

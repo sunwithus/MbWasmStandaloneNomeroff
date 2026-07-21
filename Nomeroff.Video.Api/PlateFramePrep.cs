@@ -9,9 +9,37 @@ namespace Nomeroff.Video.Api;
 /// Подготовка кадра регистратора для OCR номера:
 /// убрать OSD/капот и при необходимости увеличить зону дороги (мелкие номера вдалеке).
 /// </summary>
-internal static class PlateFramePrep
+public static class PlateFramePrep
 {
     private static readonly JpegEncoder Jpeg90 = new() { Quality = 90 };
+
+    /// <summary>Вырезать bbox [x1,y1,x2,y2] с небольшим padding; null если bbox пустой.</summary>
+    public static byte[]? CropByBbox(byte[] jpegBytes, int[]? bbox, int padPx = 8)
+    {
+        if (jpegBytes.Length == 0 || bbox == null || bbox.Length < 4)
+            return null;
+        var x1 = Math.Min(bbox[0], bbox[2]);
+        var y1 = Math.Min(bbox[1], bbox[3]);
+        var x2 = Math.Max(bbox[0], bbox[2]);
+        var y2 = Math.Max(bbox[1], bbox[3]);
+        if (x2 - x1 < 8 || y2 - y1 < 8)
+            return null;
+
+        using var image = Image.Load<Rgb24>(jpegBytes);
+        x1 = Math.Clamp(x1 - padPx, 0, image.Width - 1);
+        y1 = Math.Clamp(y1 - padPx, 0, image.Height - 1);
+        x2 = Math.Clamp(x2 + padPx, x1 + 1, image.Width);
+        y2 = Math.Clamp(y2 + padPx, y1 + 1, image.Height);
+        var w = x2 - x1;
+        var h = y2 - y1;
+        if (w < 8 || h < 8)
+            return null;
+
+        image.Mutate(x => x.Crop(new Rectangle(x1, y1, w, h)));
+        using var ms = new MemoryStream();
+        image.SaveAsJpeg(ms, Jpeg90);
+        return ms.ToArray();
+    }
 
     public static byte[] CropBottom(byte[] jpegBytes, double bottomRatio)
     {

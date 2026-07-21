@@ -6,6 +6,8 @@ public class RecordDto
 {
     [JsonPropertyName("screenshot_base64")]
     public string? ScreenshotBase64 { get; set; }
+    [JsonPropertyName("plate_image_base64")]
+    public string? PlateImageBase64 { get; set; }
     [JsonPropertyName("latitude")]
     public double? Latitude { get; set; }
     [JsonPropertyName("longitude")]
@@ -20,6 +22,9 @@ public class RecordDto
     public string? Source { get; set; }
     [JsonPropertyName("db")]
     public string? Db { get; set; }
+    /// <summary>Уверенность OCR 0..1 → S_BELONG («87%»).</summary>
+    [JsonPropertyName("confidence")]
+    public double? Confidence { get; set; }
     [JsonPropertyName("reserved1")]
     public string? Reserved1 { get; set; }
     [JsonPropertyName("reserved2")]

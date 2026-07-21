@@ -286,12 +286,6 @@
     private async Task ProcessVideoOnServer()
     {
         if (_selectedVideoFile == null) return;
-        var videoUrl = await SettingsSvc.GetVideoApiBaseUrlAsync();
-        if (string.IsNullOrEmpty(videoUrl))
-        {
-            Snackbar.Add("Укажите URL Video API в настройках", Severity.Warning);
-            return;
-        }
         _processing = true;
         _videoResults.Clear();
         _lastResponse = null;
@@ -372,12 +366,27 @@
         var deviceName = await SettingsSvc.GetDeviceNameAsync();
         foreach (var p in response.Plates.Where(x => !x.IsDuplicate && x.Confidence >= minConf))
         {
+            string? plateCropB64 = p.PlateImageBase64;
+            if (string.IsNullOrEmpty(plateCropB64) && p.Bbox is { Length: >= 4 })
+            {
+                try
+                {
+                    var fullBytes = Convert.FromBase64String(screenshotBase64);
+                    var crop = global::Nomeroff.Video.Api.PlateFramePrep.CropByBbox(fullBytes, p.Bbox);
+                    if (crop != null)
+                        plateCropB64 = Convert.ToBase64String(crop);
+                }
+                catch { /* ignore */ }
+            }
+
             var dbName = await Records.GetOrCreateCurrentDbAsync();
             var saved = await Records.SaveRecordAsync(new RecordDto
             {
                 ScreenshotBase64 = screenshotBase64,
+                PlateImageBase64 = plateCropB64,
                 TimeUtc = timeUtc,
                 CarNumber = p.Plate,
+                Confidence = p.Confidence,
                 DeviceId = string.IsNullOrEmpty(deviceName) ? null : deviceName,
                 Source = "image_file",
                 Db = dbName

@@ -17,7 +17,7 @@ public static class InterbaseServiceCollectionExtensions
         var dbFolder = Path.GetFullPath(Path.Combine(contentRoot, config["Interbase:DbFolder"] ?? "Examples"));
         var archivePath = Path.GetFullPath(Path.Combine(contentRoot, config["Interbase:ArchivePath"] ?? "empty38.zip"));
         Directory.CreateDirectory(dbFolder);
-        services.AddSingleton(new DbManager(dbFolder, archivePath));
+        services.AddSingleton(new DbManager(dbFolder, archivePath, config));
 
         var defaultConnStr = config["Interbase:ConnectionString"] ?? "";
         var generatorName = config["Interbase:GeneratorName"] ?? NomeroffInterbaseService.DefaultGeneratorName;
@@ -59,11 +59,12 @@ public static class InterbaseEndpointExtensions
         {
             var logger = loggerFactory.CreateLogger("NomeroffInterbase");
             logger.LogInformation("/api/records: Db={Db}, CarNumber={CarNumber}, DeviceId={DeviceId}, Source={Source}, " +
-                "ScreenshotBase64 is {ScreenshotStatus} (len={ScreenshotLen}), Lat={Lat}, Lon={Lon}",
+                "ScreenshotBase64 is {ScreenshotStatus} (len={ScreenshotLen}), plateLen={PlateLen}, Lat={Lat}, Lon={Lon}, Conf={Conf}",
                 req.Db, req.CarNumber, req.DeviceId, req.Source,
                 string.IsNullOrEmpty(req.ScreenshotBase64) ? "NULL/EMPTY" : "PRESENT",
                 req.ScreenshotBase64?.Length ?? 0,
-                req.Latitude, req.Longitude);
+                req.PlateImageBase64?.Length ?? 0,
+                req.Latitude, req.Longitude, req.Confidence);
 
             var connStr = GetConnectionString(req.Db, dbManager, config);
             var service = InterbaseServiceCollectionExtensions.CreateService(connStr, logger, config);
@@ -91,9 +92,40 @@ public static class InterbaseEndpointExtensions
                 logger.LogWarning("/api/records: ScreenshotBase64 пуст — изображение НЕ будет записано!");
             }
 
+            byte[]? plateBlob = null;
+            if (!string.IsNullOrEmpty(req.PlateImageBase64))
+            {
+                try
+                {
+                    plateBlob = Convert.FromBase64String(req.PlateImageBase64);
+                    logger.LogInformation("/api/records: plate crop Base64, size={Size}", plateBlob.Length);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "/api/records: Ошибка декодирования plate_image_base64");
+                }
+            }
+
+            var belong = !string.IsNullOrWhiteSpace(req.Belong)
+                ? req.Belong.Trim()
+                : NomeroffInterbaseService.FormatBelongPercent(req.Confidence);
+
             var lat = req.Latitude;
             var lon = req.Longitude;
-            if (!lat.HasValue || !lon.HasValue)
+            var tryLiveGps = !lat.HasValue || !lon.HasValue;
+            // Видео/папка: координаты только из OSD кадра, не из USB-GPS приёмника
+            if (tryLiveGps && !string.IsNullOrEmpty(req.Source))
+            {
+                var src = req.Source;
+                if (src.Contains("video", StringComparison.OrdinalIgnoreCase)
+                    || src.Contains("folder", StringComparison.OrdinalIgnoreCase)
+                    || src.Contains("watch", StringComparison.OrdinalIgnoreCase))
+                {
+                    tryLiveGps = false;
+                    logger.LogInformation("/api/records: source={Source} — live GPS не используем (нужен OSD)", src);
+                }
+            }
+            if (tryLiveGps)
             {
                 // Тот же процесс: берём GPS напрямую, без HTTP
                 var local = gpsService.CurrentPosition;
@@ -145,9 +177,11 @@ public static class InterbaseEndpointExtensions
             var deviceId = req.DeviceId ?? config["Interbase:DefaultDeviceId"] ?? Environment.MachineName;
             var carNumber = PlateAlphabet.LatinToCyrillic(req.CarNumber);
             logger.LogInformation(
-                "/api/records: вызов SaveRecordAsync: deviceId={DeviceId}, carNumber={CarNumber}, lat={Lat}, lon={Lon}, imageSize={Size}, timeUtc={TimeUtc}",
-                deviceId, carNumber, lat, lon, screenshotBlob?.Length ?? 0, req.TimeUtc);
-            var id = await service.SaveRecordAsync(deviceId, carNumber, lat, lon, screenshotBlob, timeUtc: req.TimeUtc);
+                "/api/records: вызов SaveRecordAsync: deviceId={DeviceId}, carNumber={CarNumber}, belong={Belong}, lat={Lat}, lon={Lon}, imageSize={Size}, plateSize={Plate}, timeUtc={TimeUtc}",
+                deviceId, carNumber, belong, lat, lon, screenshotBlob?.Length ?? 0, plateBlob?.Length ?? 0, req.TimeUtc);
+            var id = await service.SaveRecordAsync(
+                deviceId, carNumber, lat, lon, screenshotBlob,
+                timeUtc: req.TimeUtc, belong: belong, plateBlob: plateBlob);
             logger.LogInformation("/api/records: запись сохранена, id={Id}", id);
             return Results.Ok(new { id });
         });
@@ -163,6 +197,15 @@ public static class InterbaseEndpointExtensions
             var logger = loggerFactory.CreateLogger("NomeroffInterbase");
             logger.LogInformation("api/db/create: name={Name}", req.Name);
             var (success, message) = await dbManager.CreateFromArchiveAsync(req.Name ?? "");
+            if (success)
+            {
+                try
+                {
+                    var cs = dbManager.GetConnectionString(req.Name ?? "");
+                    NomeroffInterbaseService.InvalidateGeneratorCache(cs);
+                }
+                catch { /* ignore */ }
+            }
             return success ? Results.Ok(new { success = true, message }) : Results.BadRequest(new { success = false, message });
         });
 
@@ -173,6 +216,18 @@ public static class InterbaseEndpointExtensions
             if (string.IsNullOrWhiteSpace(db))
                 return Results.BadRequest(new { success = false, message = "Укажите имя БД." });
             var (success, message) = dbManager.DeleteDatabase(db);
+            if (success)
+            {
+                try
+                {
+                    var cs = dbManager.GetConnectionString(db);
+                    NomeroffInterbaseService.InvalidateGeneratorCache(cs);
+                }
+                catch
+                {
+                    NomeroffInterbaseService.InvalidateGeneratorCache();
+                }
+            }
             return success ? Results.Ok(new { success = true, message }) : Results.BadRequest(new { success = false, message });
         });
 
@@ -278,6 +333,21 @@ public static class InterbaseEndpointExtensions
             return Results.File(bytes, "image/jpeg");
         });
 
+        app.MapGet("/api/db/plate-image/{id:long}", async (long id, string? db, NomeroffInterbaseService defaultService, DbManager dbManager, IConfiguration config, ILoggerFactory loggerFactory) =>
+        {
+            var logger = loggerFactory.CreateLogger("NomeroffInterbase");
+            var connStr = GetConnectionString(db, dbManager, config);
+            var service = string.IsNullOrEmpty(db)
+                ? defaultService
+                : InterbaseServiceCollectionExtensions.CreateService(connStr, logger, config);
+            if (!service.IsConfigured)
+                return Results.NotFound();
+            var bytes = await service.GetPlateImageAsync(id);
+            if (bytes == null || bytes.Length == 0)
+                return Results.NotFound();
+            return Results.File(bytes, "image/jpeg");
+        });
+
         app.MapGet("/ops/interbase", () =>
         {
             var html = new StringBuilder();
@@ -306,6 +376,8 @@ public class RecordRequest
     public string? Db { get; set; }
     [JsonPropertyName("screenshot_base64")]
     public string? ScreenshotBase64 { get; set; }
+    [JsonPropertyName("plate_image_base64")]
+    public string? PlateImageBase64 { get; set; }
     [JsonPropertyName("latitude")]
     public double? Latitude { get; set; }
     [JsonPropertyName("longitude")]
@@ -318,6 +390,12 @@ public class RecordRequest
     public string? DeviceId { get; set; }
     [JsonPropertyName("source")]
     public string? Source { get; set; }
+    /// <summary>0..1 — пишется в S_BELONG как «87%».</summary>
+    [JsonPropertyName("confidence")]
+    public double? Confidence { get; set; }
+    /// <summary>Готовая строка для S_BELONG (если задана — приоритетнее confidence).</summary>
+    [JsonPropertyName("belong")]
+    public string? Belong { get; set; }
     [JsonPropertyName("reserved1")]
     public string? Reserved1 { get; set; }
     [JsonPropertyName("reserved2")]

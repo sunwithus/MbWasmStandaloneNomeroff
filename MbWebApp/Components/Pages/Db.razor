@@ -1,16 +1,415 @@
 @page "/db"
+@using System.Text.Json
+@using System.Net.Http.Json
 @inject SettingsService SettingsSvc
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+@inject IHttpClientFactory HttpFactory
 
 <PageTitle>База записей</PageTitle>
 
 <MudText Typo="Typo.h4" Class="page-title" GutterBottom="true">База записей</MudText>
 <MudText Typo="Typo.body1" Class="mb-4" Style="max-width:42rem;">
-    Архив распознанных номеров в Interbase — просмотр, проверка связи и выгрузка кадров.
+    Архив распознанных номеров в Interbase — кадр, кроп номера и % уверенности рядом, чтобы сразу видеть ошибки OCR.
 </MudText>
 
-<MudPaper Class="pa-0 soft-card overflow-hidden" Outlined="true" Elevation="0">
-    <iframe title="База записей"
-            src="/ops/db"
-            style="border:none; width:100%; height:70vh; background:#FFFBF5;"
-            loading="lazy"></iframe>
+<MudPaper Class="pa-4 soft-card mb-4" Outlined="true" Elevation="0">
+    <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Style="flex-wrap:wrap;">
+        <MudSelect T="string" Value="_selectedDb" Label="База (.IBS)" Style="min-width:220px;"
+                   Disabled="@_loading" Immediate="true" AnchorOrigin="Origin.BottomCenter"
+                   ValueChanged="OnDbChangedAsync">
+            @foreach (var d in _databases)
+            {
+                <MudSelectItem T="string" Value="@d">@d</MudSelectItem>
+            }
+        </MudSelect>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Refresh"
+                   OnClick="LoadRecordsAsync" Disabled="@(_loading || string.IsNullOrEmpty(_selectedDb))">
+            Обновить
+        </MudButton>
+        <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.ChevronLeft"
+                   OnClick="PrevPageAsync" Disabled="@(_loading || _offset <= 0)">←</MudButton>
+        <MudText Typo="Typo.caption" Style="min-width:7rem;text-align:center;">@_pageInfo</MudText>
+        <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.ChevronRight"
+                   OnClick="NextPageAsync" Disabled="@(_loading || _offset + _limit >= _total)">→</MudButton>
+        <MudButton Variant="Variant.Text" OnClick="TestConnAsync" Disabled="@(_loading || string.IsNullOrEmpty(_selectedDb))">Тест</MudButton>
+        <MudSpacer />
+        <MudTextField @bind-Value="_newDbName" Label="Новая БД" Style="width:160px;" Immediate="true" />
+        <MudButton Variant="Variant.Outlined" Color="Color.Primary" OnClick="CreateDbAsync" Disabled="@_loading">Создать</MudButton>
+        <MudButton Variant="Variant.Text" Color="Color.Error" OnClick="DeleteDbAsync"
+                   Disabled="@(_loading || string.IsNullOrEmpty(_selectedDb))">Удалить БД</MudButton>
+    </MudStack>
+    @if (!string.IsNullOrEmpty(_status))
+    {
+        <MudText Typo="Typo.caption" Class="mt-2" Color="@(_statusOk ? Color.Success : Color.Error)">@_status</MudText>
+    }
 </MudPaper>
+
+<MudPaper Class="pa-0 soft-card overflow-hidden" Outlined="true" Elevation="0">
+    @if (_loading)
+    {
+        <MudProgressLinear Indeterminate="true" Color="Color.Primary" />
+    }
+    <MudTable Items="_rows" Hover="true" Dense="true" Breakpoint="Breakpoint.Sm" Loading="_loading"
+              LoadingProgressColor="Color.Primary">
+        <HeaderContent>
+            <MudTh>ID</MudTh>
+            <MudTh>Устройство</MudTh>
+            <MudTh>Дата</MudTh>
+            <MudTh>Номер</MudTh>
+            <MudTh>Увер.</MudTh>
+            <MudTh>Кадр</MudTh>
+            <MudTh>Номер (кроп)</MudTh>
+            <MudTh>Широта</MudTh>
+            <MudTh>Долгота</MudTh>
+            <MudTh></MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd DataLabel="ID">@context.Id</MudTd>
+            <MudTd DataLabel="Устройство">@context.DeviceId</MudTd>
+            <MudTd DataLabel="Дата">@context.DateText</MudTd>
+            <MudTd DataLabel="Номер">
+                <MudText Typo="Typo.subtitle2" Style="font-family:ui-monospace,Consolas,monospace;letter-spacing:.04em;">
+                    @context.Plate
+                </MudText>
+            </MudTd>
+            <MudTd DataLabel="Увер.">
+                <MudChip T="string" Size="Size.Small" Color="@ConfColor(context.Belong)" Variant="Variant.Filled">
+                    @(string.IsNullOrEmpty(context.Belong) ? "—" : context.Belong)
+                </MudChip>
+            </MudTd>
+            <MudTd DataLabel="Кадр">
+                @if (context.HasFoto)
+                {
+                    <MudImage Src="@FullUrl(context.Id)" Alt="frame" Class="rounded"
+                              Style="max-height:72px;max-width:140px;cursor:pointer;object-fit:contain;background:#f5f5f5;"
+                              @onclick="@(() => OpenImageAsync(FullUrl(context.Id), $"Кадр #{context.Id}"))" />
+                }
+                else
+                {
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">нет</MudText>
+                }
+            </MudTd>
+            <MudTd DataLabel="Кроп">
+                @if (context.HasPlate)
+                {
+                    <MudImage Src="@PlateUrl(context.Id)" Alt="plate" Class="rounded"
+                              Style="max-height:56px;max-width:120px;cursor:pointer;object-fit:contain;background:#f5f5f5;"
+                              @onclick="@(() => OpenImageAsync(PlateUrl(context.Id), $"Номер #{context.Id}"))" />
+                }
+                else
+                {
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">нет</MudText>
+                }
+            </MudTd>
+            <MudTd DataLabel="Широта">@(context.Lat?.ToString("F5") ?? "")</MudTd>
+            <MudTd DataLabel="Долгота">@(context.Lon?.ToString("F5") ?? "")</MudTd>
+            <MudTd>
+                <MudIconButton Icon="@Icons.Material.Filled.Delete" Color="Color.Error" Size="Size.Small"
+                               OnClick="() => DeleteRecordAsync(context.Id)" aria-label="Удалить" />
+            </MudTd>
+        </RowTemplate>
+        <NoRecordsContent>
+            <MudText Class="pa-6" Color="Color.Secondary">
+                @(string.IsNullOrEmpty(_selectedDb) ? "Выберите БД" : "Нет записей")
+            </MudText>
+        </NoRecordsContent>
+    </MudTable>
+</MudPaper>
+
+@code {
+    private readonly List<string> _databases = new();
+    private readonly List<DbRow> _rows = new();
+    private string? _selectedDb;
+    private string _newDbName = "";
+    private string _status = "";
+    private bool _statusOk;
+    private bool _loading;
+    private int _offset;
+    private const int _limit = 50;
+    private int _total;
+    private string _baseUrl = "";
+
+    private string _pageInfo => _total == 0
+        ? ""
+        : $"{_offset + 1}-{Math.Min(_offset + _rows.Count, _total)} / {_total}";
+
+    protected override async Task OnInitializedAsync()
+    {
+        _baseUrl = (await SettingsSvc.GetRecordsApiBaseUrlAsync()).TrimEnd('/');
+        await LoadDatabasesAsync();
+        var (cur, _) = await SettingsSvc.GetCurrentDbAsync();
+        if (!string.IsNullOrEmpty(cur) && _databases.Contains(cur))
+            _selectedDb = cur;
+        else if (_databases.Count > 0)
+            _selectedDb = _databases[0];
+        if (!string.IsNullOrEmpty(_selectedDb))
+            await LoadRecordsAsync();
+    }
+
+    private async Task OnDbChangedAsync(string? db)
+    {
+        _selectedDb = db;
+        _offset = 0;
+        _rows.Clear();
+        if (!string.IsNullOrEmpty(_selectedDb))
+            await LoadRecordsAsync();
+        else
+            StateHasChanged();
+    }
+
+    private HttpClient Client()
+    {
+        var c = HttpFactory.CreateClient();
+        c.BaseAddress = new Uri(_baseUrl.TrimEnd('/') + "/");
+        c.Timeout = TimeSpan.FromSeconds(60);
+        return c;
+    }
+
+    private string FullUrl(long id) =>
+        $"{_baseUrl}/api/db/image/{id}?db={Uri.EscapeDataString(_selectedDb ?? "")}";
+
+    private string PlateUrl(long id) =>
+        $"{_baseUrl}/api/db/plate-image/{id}?db={Uri.EscapeDataString(_selectedDb ?? "")}";
+
+    private static Color ConfColor(string belong)
+    {
+        if (!int.TryParse(belong.TrimEnd('%'), out var n)) return Color.Default;
+        if (n >= 80) return Color.Success;
+        if (n >= 60) return Color.Warning;
+        return Color.Error;
+    }
+
+    private async Task LoadDatabasesAsync()
+    {
+        try
+        {
+            using var http = Client();
+            var j = await http.GetFromJsonAsync<JsonElement>("api/db/list");
+            _databases.Clear();
+            if (j.TryGetProperty("databases", out var arr))
+                foreach (var d in arr.EnumerateArray())
+                {
+                    var s = d.GetString();
+                    if (!string.IsNullOrEmpty(s)) _databases.Add(s);
+                }
+        }
+        catch (Exception ex)
+        {
+            _status = ex.Message;
+            _statusOk = false;
+        }
+    }
+
+    private async Task LoadRecordsAsync()
+    {
+        if (string.IsNullOrEmpty(_selectedDb)) return;
+        _loading = true;
+        _status = "";
+        try
+        {
+            using var http = Client();
+            var url = $"api/db/records?db={Uri.EscapeDataString(_selectedDb)}&limit={_limit}&offset={_offset}";
+            var j = await http.GetFromJsonAsync<JsonElement>(url);
+            if (j.TryGetProperty("message", out var msg) && msg.ValueKind == JsonValueKind.String
+                && !string.IsNullOrEmpty(msg.GetString()))
+            {
+                _rows.Clear();
+                _total = 0;
+                _status = msg.GetString()!;
+                _statusOk = false;
+                return;
+            }
+
+            _total = j.TryGetProperty("total", out var t) && t.ValueKind == JsonValueKind.Number ? t.GetInt32() : 0;
+            _rows.Clear();
+            if (j.TryGetProperty("records", out var recs))
+            {
+                foreach (var r in recs.EnumerateArray())
+                {
+                    var id = r.TryGetProperty("s_INCKEY", out var idEl) ? idEl.GetInt64() : 0;
+                    DateTime? dt = null;
+                    if (r.TryGetProperty("s_DATETIME", out var dtEl) && dtEl.ValueKind == JsonValueKind.String
+                        && DateTime.TryParse(dtEl.GetString(), out var parsed))
+                        dt = parsed;
+                    double? lat = r.TryGetProperty("s_LATITUDE", out var la) && la.ValueKind == JsonValueKind.Number ? la.GetDouble() : null;
+                    double? lon = r.TryGetProperty("s_LONGITUDE", out var lo) && lo.ValueKind == JsonValueKind.Number ? lo.GetDouble() : null;
+                    _rows.Add(new DbRow
+                    {
+                        Id = id,
+                        DeviceId = r.TryGetProperty("s_DEVICEID", out var dev) ? dev.GetString() ?? "" : "",
+                        DateText = dt?.ToLocalTime().ToString("g") ?? "",
+                        Plate = r.TryGetProperty("s_NOTICE", out var n) ? n.GetString() ?? "" : "",
+                        Belong = r.TryGetProperty("s_BELONG", out var b) ? b.GetString() ?? "" : "",
+                        HasFoto = r.TryGetProperty("hasFoto", out var hf) && hf.ValueKind == JsonValueKind.True,
+                        HasPlate = r.TryGetProperty("hasPlate", out var hp) && hp.ValueKind == JsonValueKind.True,
+                        Lat = lat,
+                        Lon = lon
+                    });
+                }
+            }
+
+            if (_offset > 0 && _rows.Count == 0 && _total > 0)
+            {
+                _offset = Math.Max(0, _offset - _limit);
+                await LoadRecordsAsync();
+                return;
+            }
+
+            _status = $"Записей на странице: {_rows.Count} / {_total}";
+            _statusOk = true;
+        }
+        catch (Exception ex)
+        {
+            _status = ex.Message;
+            _statusOk = false;
+            Snackbar.Add("Ошибка загрузки: " + ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _loading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task PrevPageAsync()
+    {
+        if (_offset <= 0) return;
+        _offset = Math.Max(0, _offset - _limit);
+        await LoadRecordsAsync();
+    }
+
+    private async Task NextPageAsync()
+    {
+        _offset += _limit;
+        await LoadRecordsAsync();
+    }
+
+    private async Task TestConnAsync()
+    {
+        if (string.IsNullOrEmpty(_selectedDb)) return;
+        try
+        {
+            using var http = Client();
+            var j = await http.GetFromJsonAsync<JsonElement>($"api/db/test?db={Uri.EscapeDataString(_selectedDb)}");
+            var ok = j.TryGetProperty("success", out var s) && s.GetBoolean();
+            var msg = j.TryGetProperty("message", out var m) ? m.GetString() : null;
+            _status = msg ?? (ok ? "OK" : "Ошибка");
+            _statusOk = ok;
+            Snackbar.Add(_status, ok ? Severity.Success : Severity.Error);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task CreateDbAsync()
+    {
+        var name = _newDbName.Trim();
+        if (string.IsNullOrEmpty(name))
+        {
+            Snackbar.Add("Введите имя БД", Severity.Warning);
+            return;
+        }
+        try
+        {
+            using var http = Client();
+            var resp = await http.PostAsJsonAsync("api/db/create", new { name });
+            var j = await resp.Content.ReadFromJsonAsync<JsonElement>();
+            var ok = j.TryGetProperty("success", out var s) && s.GetBoolean();
+            var msg = j.TryGetProperty("message", out var m) ? m.GetString() : resp.ReasonPhrase;
+            Snackbar.Add(msg ?? "", ok ? Severity.Success : Severity.Error);
+            if (ok)
+            {
+                _newDbName = "";
+                await LoadDatabasesAsync();
+                var file = name.EndsWith(".IBS", StringComparison.OrdinalIgnoreCase) ? name : name + ".IBS";
+                _selectedDb = file;
+                _offset = 0;
+                await LoadRecordsAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task DeleteDbAsync()
+    {
+        if (string.IsNullOrEmpty(_selectedDb)) return;
+        if (!await JS.InvokeAsync<bool>("confirm", $"Удалить {_selectedDb}? Все данные будут потеряны."))
+            return;
+        try
+        {
+            using var http = Client();
+            var resp = await http.DeleteAsync($"api/db/delete?db={Uri.EscapeDataString(_selectedDb)}");
+            var j = await resp.Content.ReadFromJsonAsync<JsonElement>();
+            var ok = j.TryGetProperty("success", out var s) && s.GetBoolean();
+            var msg = j.TryGetProperty("message", out var m) ? m.GetString() : "";
+            Snackbar.Add(msg ?? "", ok ? Severity.Success : Severity.Error);
+            if (ok)
+            {
+                _selectedDb = null;
+                _rows.Clear();
+                await LoadDatabasesAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task DeleteRecordAsync(long id)
+    {
+        if (!await JS.InvokeAsync<bool>("confirm", $"Удалить запись {id}?"))
+            return;
+        try
+        {
+            using var http = Client();
+            var resp = await http.DeleteAsync($"api/db/records/{id}?db={Uri.EscapeDataString(_selectedDb ?? "")}");
+            var j = await resp.Content.ReadFromJsonAsync<JsonElement>();
+            if (j.TryGetProperty("success", out var s) && s.GetBoolean())
+                await LoadRecordsAsync();
+            else
+                Snackbar.Add("Ошибка удаления", Severity.Error);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task OpenImageAsync(string url, string title)
+    {
+        var parameters = new DialogParameters<ImageDialog>
+        {
+            { x => x.Url, url },
+            { x => x.Title, title }
+        };
+        var options = new DialogOptions
+        {
+            MaxWidth = MaxWidth.Large,
+            FullWidth = true,
+            CloseButton = true
+        };
+        await DialogService.ShowAsync<ImageDialog>(title, parameters, options);
+    }
+
+    private sealed class DbRow
+    {
+        public long Id { get; set; }
+        public string DeviceId { get; set; } = "";
+        public string DateText { get; set; } = "";
+        public string Plate { get; set; } = "";
+        public string Belong { get; set; } = "";
+        public bool HasFoto { get; set; }
+        public bool HasPlate { get; set; }
+        public double? Lat { get; set; }
+        public double? Lon { get; set; }
+    }
+}

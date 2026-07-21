@@ -297,13 +297,28 @@
         var dbName = await Records.GetOrCreateCurrentDbAsync();
         foreach (var p in response.Plates.Where(x => !x.IsDuplicate && x.Confidence >= minConf))
         {
+            string? plateCropB64 = p.PlateImageBase64;
+            if (string.IsNullOrEmpty(plateCropB64) && p.Bbox is { Length: >= 4 })
+            {
+                try
+                {
+                    var fullBytes = Convert.FromBase64String(screenshotBase64);
+                    var crop = global::Nomeroff.Video.Api.PlateFramePrep.CropByBbox(fullBytes, p.Bbox);
+                    if (crop != null)
+                        plateCropB64 = Convert.ToBase64String(crop);
+                }
+                catch { /* ignore crop errors */ }
+            }
+
             var dto = new RecordDto
             {
                 ScreenshotBase64 = screenshotBase64,
+                PlateImageBase64 = plateCropB64,
                 Latitude = lat,
                 Longitude = lon,
                 TimeUtc = timeUtc,
                 CarNumber = p.Plate,
+                Confidence = p.Confidence,
                 DeviceId = string.IsNullOrEmpty(deviceName) ? null : deviceName,
                 Source = "camera",
                 Db = dbName

@@ -1,0 +1,88 @@
+@inject NomeroffService Nomeroff
+@inject NavigationManager Nav
+@implements IAsyncDisposable
+
+<div class="appbar-health" title="Состояние приложения и OCR (обновление каждые 10 с)">
+    <MudChip T="string" Size="Size.Small" Variant="Variant.Filled"
+             Color="@(_appOk ? Color.Success : Color.Error)"
+             Class="appbar-health-chip"
+             OnClick="@(() => Nav.NavigateTo("/status"))">
+        App @(_appOk ? "OK" : "—")
+    </MudChip>
+    <MudChip T="string" Size="Size.Small" Variant="Variant.Filled"
+             Color="@(_ocrOk ? Color.Success : Color.Warning)"
+             Class="appbar-health-chip"
+             OnClick="@(() => Nav.NavigateTo("/status"))">
+        OCR @(_ocrOk ? "OK" : "—")
+    </MudChip>
+</div>
+
+@code {
+    private bool _appOk;
+    private bool _ocrOk;
+    private bool _painted;
+    private CancellationTokenSource? _cts;
+    private Task? _loop;
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _cts = new CancellationTokenSource();
+            _loop = RunLoopAsync(_cts.Token);
+        }
+        return Task.CompletedTask;
+    }
+
+    private async Task RunLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await RefreshQuietAsync(ct);
+            try { await Task.Delay(10_000, ct); }
+            catch (OperationCanceledException) { break; }
+        }
+    }
+
+    private async Task RefreshQuietAsync(CancellationToken ct)
+    {
+        var appOk = false;
+        var ocrOk = false;
+        try
+        {
+            using var http = new HttpClient { BaseAddress = new Uri(Nav.BaseUri), Timeout = TimeSpan.FromSeconds(3) };
+            using var resp = await http.GetAsync("health", ct);
+            appOk = resp.IsSuccessStatusCode;
+        }
+        catch { /* offline */ }
+
+        try
+        {
+            var status = await Nomeroff.HealthAsync(ct);
+            ocrOk = status?.ModelLoaded == true;
+        }
+        catch { /* offline */ }
+
+        if (appOk != _appOk || ocrOk != _ocrOk || !_painted)
+        {
+            _appOk = appOk;
+            _ocrOk = ocrOk;
+            _painted = true;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_cts != null)
+        {
+            await _cts.CancelAsync();
+            _cts.Dispose();
+            _cts = null;
+        }
+        if (_loop != null)
+        {
+            try { await _loop; } catch { /* ignore */ }
+        }
+    }
+}

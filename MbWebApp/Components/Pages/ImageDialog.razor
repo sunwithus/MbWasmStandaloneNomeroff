@@ -1,0 +1,25 @@
+@namespace MbWebApp.Components.Pages
+
+<MudDialog>
+    <TitleContent>
+        <MudText Typo="Typo.h6">@Title</MudText>
+    </TitleContent>
+    <DialogContent>
+        <div style="text-align:center;background:#0f1419;border-radius:8px;padding:8px;">
+            <MudImage Src="@Url" Alt="@Title" Fluid="true" Style="max-height:80vh;object-fit:contain;" />
+        </div>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Close" Variant="Variant.Text">Закрыть</MudButton>
+        <MudButton Href="@Url" Target="_blank" Variant="Variant.Outlined" Color="Color.Primary">Открыть</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private IMudDialogInstance MudDialog { get; set; } = null!;
+
+    [Parameter] public string Url { get; set; } = "";
+    [Parameter] public string Title { get; set; } = "Изображение";
+
+    private void Close() => MudDialog.Close();
+}

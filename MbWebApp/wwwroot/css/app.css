@@ -99,6 +99,24 @@ html, body {
     font-weight: 600;
 }
 
+.appbar-health {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-left: 1.25rem;
+}
+
+.appbar-health-chip {
+    font-weight: 600;
+    cursor: pointer;
+}
+
+@media (max-width: 600px) {
+    .appbar-health {
+        margin-left: 0.5rem;
+    }
+}
+
 #blazor-error-ui {
     color-scheme: light;
     background: rgba(255, 251, 245, 0.96);

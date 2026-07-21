@@ -18,10 +18,21 @@ window.settingsSet = function (key, value) {
         return false;
     }
 };
+window.settingsRemove = function (key) {
+    try {
+        localStorage.removeItem(key);
+        console.debug("[settings] remove", key);
+        return true;
+    } catch (e) {
+        console.warn("[settings] remove error", key, e);
+        return false;
+    }
+};
 
 window.settings = {
     get: window.settingsGet,
-    set: function (key, value) { window.settingsSet(key, value); }
+    set: function (key, value) { window.settingsSet(key, value); },
+    remove: window.settingsRemove
 };
 
 window.downloadLogsFile = function (content, filename) {

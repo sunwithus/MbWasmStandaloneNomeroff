@@ -3,6 +3,8 @@
 @inject SettingsService Settings
 @inject RecordsService Records
 @inject NomeroffService Nomeroff
+@inject Nomeroff.Interbase.Api.Interbase.DbManager DbManager
+@inject IConfiguration Config
 @inject ISnackbar Snackbar
 @inject NavigationManager Nav
 
@@ -10,25 +12,39 @@
 
 <MudText Typo="Typo.h4" Class="page-title" GutterBottom="true">Состояние системы</MudText>
 <MudText Typo="Typo.body1" Class="mb-4" Style="max-width:42rem;">
-    Два процесса: это окно (UI + GPS + БД + видео) и Python OCR на порту 8000.
+    Два процесса: это окно (UI + GPS + БД + видео) на :5555 и Python OCR на :8000.
+    Адреса можно посмотреть и сбросить ниже — в браузере иногда остаются старые порты после переноса.
 </MudText>
+
+@if (_hasLegacyPorts)
+{
+    <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-4" Variant="Variant.Outlined">
+        В настройках браузера найдены нестандартные порты (не :5555 / :8000) — часто это остаток старой версии.
+        Нажмите «Сбросить адреса» или исправьте в Настройках.
+    </MudAlert>
+}
 
 <MudGrid>
     <MudItem xs="12" md="6">
         <MudPaper Class="pa-4 soft-card mb-4" Outlined="true" Elevation="0">
             <MudStack Spacing="2">
-                <MudText Typo="Typo.subtitle1">Приложение (:5555)</MudText>
+                <MudText Typo="Typo.subtitle1">Приложение</MudText>
                 <MudChip T="string" Color="@(_appOk ? Color.Success : Color.Error)" Size="Size.Small">@(_appOk ? "онлайн" : "нет ответа")</MudChip>
+                <MudText Typo="Typo.caption" Style="word-break:break-all;">URL: @_appUrl</MudText>
                 <MudText Typo="Typo.caption">@_appDetail</MudText>
-                <MudButton Variant="Variant.Outlined" Size="Size.Small" OnClick="() => RefreshAsync()" StartIcon="@Icons.Material.Filled.Refresh">Обновить</MudButton>
+                <MudStack Row="true" Spacing="1">
+                    <MudButton Variant="Variant.Outlined" Size="Size.Small" OnClick="() => RefreshAsync()" StartIcon="@Icons.Material.Filled.Refresh">Обновить</MudButton>
+                    <MudButton Variant="Variant.Text" Size="Size.Small" Color="Color.Warning" OnClick="ResetUrlsAsync">Сбросить адреса</MudButton>
+                </MudStack>
             </MudStack>
         </MudPaper>
     </MudItem>
     <MudItem xs="12" md="6">
         <MudPaper Class="pa-4 soft-card mb-4" Outlined="true" Elevation="0">
             <MudStack Spacing="2">
-                <MudText Typo="Typo.subtitle1">Распознавание OCR (:8000)</MudText>
+                <MudText Typo="Typo.subtitle1">Распознавание OCR</MudText>
                 <MudChip T="string" Color="@(_ocrOk ? Color.Success : Color.Warning)" Size="Size.Small">@(_ocrOk ? "модель готова" : "недоступно")</MudChip>
+                <MudText Typo="Typo.caption" Style="word-break:break-all;">URL: @_ocrUrl</MudText>
                 <MudText Typo="Typo.caption">@_ocrDetail</MudText>
                 <MudButton Variant="Variant.Text" Size="Size.Small" Href="/swagger" Target="_blank">Swagger API</MudButton>
             </MudStack>
@@ -36,24 +52,46 @@
     </MudItem>
 </MudGrid>
 
-<MudPaper Class="pa-4 soft-card" Outlined="true" Elevation="0">
+<MudPaper Class="pa-4 soft-card mb-4" Outlined="true" Elevation="0">
     <MudText Typo="Typo.subtitle2" Class="mb-2">GPS</MudText>
+    <MudText Typo="Typo.caption" Class="mb-1" Style="word-break:break-all;">URL: @_gpsUrl</MudText>
     <MudText Typo="Typo.body2">@_gpsDetail</MudText>
+</MudPaper>
+
+<MudPaper Class="pa-4 soft-card" Outlined="true" Elevation="0">
+    <MudText Typo="Typo.subtitle2" Class="mb-2">InterBase (из appsettings)</MudText>
+    <MudText Typo="Typo.body2">@_ibDetail</MudText>
 </MudPaper>
 
 @code {
     private bool _appOk;
     private bool _ocrOk;
+    private bool _hasLegacyPorts;
+    private string _appUrl = "…";
+    private string _ocrUrl = "…";
+    private string _gpsUrl = "…";
     private string _appDetail = "…";
     private string _ocrDetail = "…";
     private string _gpsDetail = "…";
+    private string _ibDetail = "…";
 
     protected override async Task OnInitializedAsync() => await RefreshAsync(showSnack: false);
 
     private async Task RefreshAsync() => await RefreshAsync(showSnack: true);
 
+    private static bool LooksLegacyPort(string url) =>
+        url.Contains(":5060", StringComparison.OrdinalIgnoreCase)
+        || url.Contains(":5552", StringComparison.OrdinalIgnoreCase)
+        || url.Contains(":5553", StringComparison.OrdinalIgnoreCase);
+
     private async Task RefreshAsync(bool showSnack)
     {
+        _appUrl = await Settings.GetRecordsApiBaseUrlAsync();
+        _ocrUrl = await Settings.GetApiBaseUrlAsync();
+        _gpsUrl = await Settings.GetGpsApiBaseUrlAsync();
+        _hasLegacyPorts = LooksLegacyPort(_ocrUrl) || LooksLegacyPort(_gpsUrl) || LooksLegacyPort(_appUrl);
+        _ibDetail = $"{DbManager.DataSource}:{DbManager.Port} · папка {DbManager.DbFolder}";
+
         try
         {
             using var http = new HttpClient { BaseAddress = new Uri(Nav.BaseUri), Timeout = TimeSpan.FromSeconds(5) };
@@ -71,12 +109,14 @@
         {
             var status = await Nomeroff.HealthAsync();
             _ocrOk = status?.ModelLoaded == true;
-            _ocrDetail = status == null ? "нет ответа" : $"{status.Status}, model_loaded={status.ModelLoaded}";
+            _ocrDetail = status == null
+                ? $"нет ответа от {_ocrUrl}/health — запущен ли start-app / OCR :8000?"
+                : $"{status.Status}, model_loaded={status.ModelLoaded}";
         }
         catch (Exception ex)
         {
             _ocrOk = false;
-            _ocrDetail = ex.Message;
+            _ocrDetail = $"{ex.Message} (URL: {_ocrUrl})";
         }
 
         try
@@ -88,10 +128,19 @@
         }
         catch (Exception ex)
         {
-            _gpsDetail = ex.Message;
+            _gpsDetail = $"{ex.Message} (URL: {_gpsUrl})";
         }
 
         if (showSnack)
             Snackbar.Add("Статус обновлён", Severity.Info);
+    }
+
+    private async Task ResetUrlsAsync()
+    {
+        await Settings.ResetServiceUrlsToDefaultsAsync();
+        Settings.InvalidateCache();
+        var (ocr, app, video) = Settings.GetDefaultServiceUrls();
+        Snackbar.Add($"Адреса сброшены: OCR {ocr}, App/Video {app} (video={video})", Severity.Success);
+        await RefreshAsync(showSnack: false);
     }
 }

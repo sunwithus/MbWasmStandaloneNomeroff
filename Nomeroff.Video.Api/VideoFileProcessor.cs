@@ -66,7 +66,7 @@ public sealed class VideoFileProcessor
             }, ct);
 
             var http = _httpFactory.CreateClient("Nomeroff");
-            var results = new List<object>();
+            var results = new List<VideoFrameEmit>();
             var plateCropRatio = Math.Clamp(_config.GetValue("GpsOcr:PlateCropBottomRatio", 0.12), 0, 0.45);
             var useRoiFallback = _config.GetValue("GpsOcr:PlateRoiFallback", true);
             // ROI/агрессивный crop чаще дают мусор — выше порог
@@ -132,44 +132,75 @@ public sealed class VideoFileProcessor
                         if (latitude.HasValue && longitude.HasValue)
                             gpsOkCount++;
                     }
-
-                    // plate -> best confidence. Важно: всегда crop + ROI (+ full), иначе «кривой» crop
-                    // блокирует ROI и теряются хорошо видимые номера.
-                    var plateBest = new Dictionary<string, double>(StringComparer.Ordinal);
-                    void Accept(IEnumerable<(string Plate, double Confidence)> found)
+                    else if (globalFrameIndex == 0)
                     {
-                        foreach (var (plate, conf) in found)
+                        _logger.LogWarning("process-video: GpsOcr выключен (GpsOcr:Enabled=false) — координаты из OSD не читаются");
+                    }
+
+                    // plate -> best confidence + crop.
+                    // Кроп номера берём ТОЛЬКО с полного кадра: ROI/crop/invert в других
+                    // координатах и часто подмешивают чужую зону к другому тексту.
+                    var plateBest = new Dictionary<string, (double Conf, string? Crop)>(StringComparer.Ordinal);
+                    void Accept(IEnumerable<(string Plate, double Confidence, string? Crop)> found, bool takeCrop)
+                    {
+                        foreach (var (plate, conf, crop) in found)
                         {
-                            if (!plateBest.TryGetValue(plate, out var prev) || conf > prev)
-                                plateBest[plate] = conf;
+                            if (!plateBest.TryGetValue(plate, out var prev) || conf > prev.Conf)
+                            {
+                                string? newCrop;
+                                if (takeCrop)
+                                    newCrop = crop ?? prev.Crop;
+                                else
+                                    newCrop = prev.Crop; // текст с ROI, кроп не трогаем
+                                plateBest[plate] = (conf, newCrop);
+                            }
+                            else if (takeCrop && crop != null && prev.Crop == null)
+                            {
+                                plateBest[plate] = (prev.Conf, crop);
+                            }
                         }
                     }
 
                     var ocrBytes = plateCropRatio > 0.001
                         ? PlateFramePrep.CropBottom(bytes, plateCropRatio)
                         : bytes;
-                    Accept(await RecognizePlatesAsync(http, ocrBytes, minConfidence, ct));
+                    // Нижний crop — тоже чужие координаты bbox/zone; только текст
+                    Accept(await RecognizePlatesAsync(http, ocrBytes, minConfidence, ct, includeCrop: false), takeCrop: false);
 
-                    // Полный кадр — иногда лучше ловит дальние/военные (не режем низ)
-                    Accept(await RecognizePlatesAsync(http, bytes, minConfidence, ct));
+                    // Полный кадр — источник кропа (zone/bbox совпадают с этим JPEG)
+                    Accept(await RecognizePlatesAsync(http, bytes, minConfidence, ct, includeCrop: true), takeCrop: true);
 
                     if (useRoiFallback)
                     {
                         var roiBytes = PlateFramePrep.RoadRoiUpscaled(bytes, bottomCropRatio: Math.Max(plateCropRatio, 0.12));
-                        Accept(await RecognizePlatesAsync(http, roiBytes, roiMinConfidence, ct));
-                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.ContrastBoost(roiBytes), roiMinConfidence, ct));
-                        // Инверсия: военные номера (9036СС45 и т.п.)
-                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.Invert(roiBytes), minConfidence, ct, militaryLookalikeFix: true));
+                        Accept(await RecognizePlatesAsync(http, roiBytes, roiMinConfidence, ct, includeCrop: false), takeCrop: false);
+                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.ContrastBoost(roiBytes), roiMinConfidence, ct, includeCrop: false), takeCrop: false);
+                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.Invert(roiBytes), minConfidence, ct, militaryLookalikeFix: true, includeCrop: false), takeCrop: false);
                     }
 
                     if (plateBest.Count == 0 && plateCropRatio < 0.18)
                     {
-                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.CropBottom(bytes, 0.18), minConfidence, ct));
+                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.CropBottom(bytes, 0.18), minConfidence, ct, includeCrop: false), takeCrop: false);
                     }
 
-                    var plates = PlateAlphabet.CollapseNearDuplicates(plateBest, maxDistance: 1);
+                    var plates = PlateAlphabet.CollapseNearDuplicates(plateBest, maxDistance: 1)
+                        .Select(p => new VideoPlateEmit
+                        {
+                            Plate = p.Plate,
+                            Confidence = p.Confidence,
+                            PlateImageBase64 = p.PlateImageBase64
+                        })
+                        .ToList();
                     var timeSec = globalFrameIndex * intervalSec;
-                    results.Add(new { timeSec, plates, imageBase64 = base64Full, latitude, longitude, overlayTimeUtc });
+                    results.Add(new VideoFrameEmit
+                    {
+                        TimeSec = timeSec,
+                        Plates = plates,
+                        ImageBase64 = base64Full,
+                        Latitude = latitude,
+                        Longitude = longitude,
+                        OverlayTimeUtc = overlayTimeUtc
+                    });
                     globalFrameIndex++;
 
                     var totalForPct = estimatedFrames ?? Math.Max(globalFrameIndex, 1);
@@ -198,15 +229,30 @@ public sealed class VideoFileProcessor
 
             if (_gpsOcr.IsAvailable)
                 _logger.LogInformation("process-video: GPS OCR {GpsOk}/{Total}", gpsOkCount, results.Count);
+            else
+                _logger.LogWarning("process-video: GpsOcr выключен — в БД не будет координат из OSD");
 
             if (results.Count == 0)
             {
-                await emit(new { type = "result", totalFrames = 0, intervalSec, results = Array.Empty<object>() }, ct);
+                await emit(new VideoProcessEmitResult
+                {
+                    TotalFrames = 0,
+                    IntervalSec = intervalSec,
+                    Results = new List<VideoFrameEmit>(),
+                    GpsOkCount = 0
+                }, ct);
                 return;
             }
 
             await emit(new { type = "progress", stage = "done", message = "Готово, отправка результата...", current = results.Count, total = results.Count, percent = 100 }, ct);
-            await emit(new { type = "result", totalFrames = results.Count, intervalSec, results }, ct);
+            // Типизированный результат — без Serialize→Deserialize анонимов (координаты не теряются)
+            await emit(new VideoProcessEmitResult
+            {
+                TotalFrames = results.Count,
+                IntervalSec = intervalSec,
+                Results = results,
+                GpsOkCount = gpsOkCount
+            }, ct);
         }
         finally
         {
@@ -327,20 +373,21 @@ public sealed class VideoFileProcessor
         return ffmpegPath;
     }
 
-    private static async Task<List<(string Plate, double Confidence)>> RecognizePlatesAsync(
+    private static async Task<List<(string Plate, double Confidence, string? Crop)>> RecognizePlatesAsync(
         HttpClient http,
         byte[] jpegBytes,
         double minConfidence,
         CancellationToken ct,
-        bool militaryLookalikeFix = false)
+        bool militaryLookalikeFix = false,
+        bool includeCrop = true)
     {
         var body = new { image_base64 = Convert.ToBase64String(jpegBytes) };
         var response = await http.PostAsJsonAsync("api/process_frame", body, ct);
         if (!response.IsSuccessStatusCode)
-            return new List<(string, double)>();
+            return new List<(string, double, string?)>();
 
         var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: ct);
-        var plates = new List<(string, double)>();
+        var plates = new List<(string, double, string?)>();
         if (json.TryGetProperty("plates", out var arr))
         {
             foreach (var item in arr.EnumerateArray())
@@ -354,6 +401,30 @@ public sealed class VideoFileProcessor
                 if (conf < minConfidence)
                     continue;
 
+                string? crop = null;
+                if (includeCrop)
+                {
+                    if (item.TryGetProperty("plate_image_base64", out var cropEl) && cropEl.ValueKind == JsonValueKind.String)
+                        crop = cropEl.GetString();
+                    if (string.IsNullOrEmpty(crop) && item.TryGetProperty("bbox", out var bboxEl) && bboxEl.ValueKind == JsonValueKind.Array)
+                    {
+                        var bbox = new int[4];
+                        var i = 0;
+                        foreach (var v in bboxEl.EnumerateArray())
+                        {
+                            if (i >= 4) break;
+                            if (v.ValueKind == JsonValueKind.Number)
+                                bbox[i++] = v.GetInt32();
+                        }
+                        if (i >= 4)
+                        {
+                            var cropBytes = PlateFramePrep.CropByBbox(jpegBytes, bbox);
+                            if (cropBytes != null)
+                                crop = Convert.ToBase64String(cropBytes);
+                        }
+                    }
+                }
+
                 var s = PlateAlphabet.Normalize(plate.GetString());
                 if (string.IsNullOrWhiteSpace(s))
                     continue;
@@ -362,7 +433,7 @@ public sealed class VideoFileProcessor
                 var milLead = PlateAlphabet.TryFixMilitaryWithLeadingLetter(s);
                 if (milLead != null)
                 {
-                    plates.Add((milLead, conf + 0.02)); // слегка предпочесть военный фикс
+                    plates.Add((milLead, conf + 0.02, crop)); // слегка предпочесть военный фикс
                     continue;
                 }
 
@@ -371,13 +442,13 @@ public sealed class VideoFileProcessor
                     var milLike = PlateAlphabet.TryFixMilitaryFromCivilianLookalike(s);
                     if (milLike != null)
                     {
-                        plates.Add((milLike, conf + 0.02));
+                        plates.Add((milLike, conf + 0.02, crop));
                         continue;
                     }
                 }
 
                 if (PlateAlphabet.LooksLikeRuPlate(s))
-                    plates.Add((s, conf));
+                    plates.Add((s, conf, crop));
             }
         }
         return plates;

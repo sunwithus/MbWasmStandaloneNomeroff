@@ -143,17 +143,42 @@ public static class PlateAlphabet
         IReadOnlyDictionary<string, double> plateToConfidence,
         int maxDistance = 1)
     {
-        // 1) по стволу (А123ВС / 9036СС) — один лучший по conf, при равном conf длиннее
-        var byStem = new Dictionary<string, (string Plate, double Conf)>(StringComparer.Ordinal);
-        foreach (var (plate, conf) in plateToConfidence)
+        var meta = plateToConfidence.ToDictionary(
+            kv => kv.Key,
+            kv => (kv.Value, (string?)null),
+            StringComparer.Ordinal);
+        return CollapseNearDuplicates(meta, maxDistance).Select(x => x.Plate).ToList();
+    }
+
+    /// <summary>
+    /// То же, что CollapseNearDuplicates, но сохраняет confidence и кроп номера победителя.
+    /// </summary>
+    public static List<(string Plate, double Confidence, string? PlateImageBase64)> CollapseNearDuplicates(
+        IReadOnlyDictionary<string, (double Confidence, string? PlateImageBase64)> plateToMeta,
+        int maxDistance = 1)
+    {
+        var byStem = new Dictionary<string, (string Plate, double Conf, string? Crop)>(StringComparer.Ordinal);
+        foreach (var (plate, meta) in plateToMeta)
         {
             var stem = DedupStem(plate);
             if (!byStem.TryGetValue(stem, out var prev)
-                || conf > prev.Conf + 0.05
-                || (plate.Length > prev.Plate.Length && conf >= prev.Conf - 0.08)
-                || (plate.Length == prev.Plate.Length && conf > prev.Conf))
+                || meta.Confidence > prev.Conf + 0.05
+                || (plate.Length > prev.Plate.Length && meta.Confidence >= prev.Conf - 0.08)
+                || (plate.Length == prev.Plate.Length && meta.Confidence > prev.Conf))
             {
-                byStem[stem] = (plate, conf);
+                // При смене текста на стволе не тащим чужой кроп
+                var crop = string.Equals(prev.Plate, plate, StringComparison.Ordinal)
+                    ? (meta.PlateImageBase64 ?? prev.Crop)
+                    : meta.PlateImageBase64;
+                if (!byStem.ContainsKey(stem))
+                    crop = meta.PlateImageBase64;
+                byStem[stem] = (plate, meta.Confidence, crop);
+            }
+            else if (meta.PlateImageBase64 != null
+                     && prev.Crop == null
+                     && string.Equals(prev.Plate, plate, StringComparison.Ordinal))
+            {
+                byStem[stem] = (prev.Plate, prev.Conf, meta.PlateImageBase64);
             }
         }
 
@@ -162,20 +187,20 @@ public static class PlateAlphabet
             .ThenByDescending(x => x.Plate.Length)
             .ToList();
 
-        var kept = new List<string>();
-        foreach (var (plate, _) in items)
+        var kept = new List<(string Plate, double Confidence, string? PlateImageBase64)>();
+        foreach (var (plate, conf, crop) in items)
         {
             var dominated = false;
             foreach (var better in kept)
             {
-                if (plate.Length == better.Length && Hamming(plate, better) <= maxDistance)
+                if (plate.Length == better.Plate.Length && Hamming(plate, better.Plate) <= maxDistance)
                 {
                     dominated = true;
                     break;
                 }
             }
             if (!dominated)
-                kept.Add(plate);
+                kept.Add((plate, conf, crop));
         }
         return kept;
     }

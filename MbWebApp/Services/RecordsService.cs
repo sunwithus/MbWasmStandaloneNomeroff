@@ -1,6 +1,8 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 using MbWebApp.Models;
+using Nomeroff.Interbase.Api.Interbase;
+using Nomeroff.Video.Api;
 
 namespace MbWebApp.Services;
 
@@ -8,12 +10,26 @@ public class RecordsService
 {
     private readonly HttpClient _http;
     private readonly SettingsService _settings;
+    private readonly VideoFileProcessor _videoProcessor;
+    private readonly DbManager _dbManager;
     private readonly ILogger<RecordsService>? _logger;
 
-    public RecordsService(HttpClient http, SettingsService settings, ILogger<RecordsService>? logger = null)
+    private static readonly JsonSerializerOptions VideoJsonOpts = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
+    public RecordsService(
+        HttpClient http,
+        SettingsService settings,
+        VideoFileProcessor videoProcessor,
+        DbManager dbManager,
+        ILogger<RecordsService>? logger = null)
     {
         _http = http;
         _settings = settings;
+        _videoProcessor = videoProcessor;
+        _dbManager = dbManager;
         _logger = logger;
     }
 
@@ -145,26 +161,21 @@ public class RecordsService
 
     private async Task CreateDbIfNeededAsync(string name, CancellationToken ct)
     {
-        var baseUrl = await _settings.GetRecordsApiBaseUrlAsync();
-        if (string.IsNullOrEmpty(baseUrl)) return;
         try
         {
-            using var client = new HttpClient { BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/") };
-            _logger?.LogDebug("CreateDbIfNeededAsync: POST api/db/create name={Name}", name);
-            var resp = await client.PostAsJsonAsync("api/db/create", new { name }, ct);
-            if (resp.IsSuccessStatusCode)
+            // Прямой вызов DbManager — без HTTP / localStorage :5060
+            var (ok, msg) = await _dbManager.CreateFromArchiveAsync(name, ct);
+            if (ok)
             {
                 _logger?.LogInformation("CreateDbIfNeededAsync: БД {Name} создана", name);
                 return;
             }
-            var json = await resp.Content.ReadFromJsonAsync<JsonElement>(ct);
-            var msg = json.TryGetProperty("message", out var m) ? m.GetString() : "";
-            if (msg?.Contains("уже", StringComparison.OrdinalIgnoreCase) == true)
+            if (msg.Contains("уже", StringComparison.OrdinalIgnoreCase))
             {
                 _logger?.LogDebug("CreateDbIfNeededAsync: БД {Name} уже существует", name);
                 return;
             }
-            _logger?.LogWarning("CreateDbIfNeededAsync: не удалось создать {Name}, {Msg}", name, msg);
+            _logger?.LogWarning("CreateDbIfNeededAsync: не удалось создать {Name}: {Msg}", name, msg);
         }
         catch (Exception ex)
         {
@@ -220,22 +231,10 @@ public class RecordsService
         IProgress<VideoProcessProgress>? progress = null,
         CancellationToken ct = default)
     {
-        var baseUrl = await _settings.GetVideoApiBaseUrlAsync();
-        if (string.IsNullOrEmpty(baseUrl)) return null;
         try
         {
-            using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
-            using var request = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/api/process-video-path?intervalSec={intervalSec}")
-            {
-                Content = JsonContent.Create(new { path = videoPath })
-            };
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger?.LogWarning("ProcessVideoFromPathAsync: HTTP {Status}", response.StatusCode);
-                return null;
-            }
-            return await ReadNdjsonVideoResponseAsync(response, progress, ct);
+            // В том же процессе (без HTTP на старый :5060 из localStorage)
+            return await RunVideoProcessorAsync(videoPath, intervalSec, progress, ct, deleteTempDirOnExit: true);
         }
         catch (InvalidOperationException)
         {
@@ -255,33 +254,25 @@ public class RecordsService
         IProgress<VideoProcessProgress>? progress = null,
         CancellationToken ct = default)
     {
-        var baseUrl = await _settings.GetVideoApiBaseUrlAsync();
-        if (string.IsNullOrEmpty(baseUrl)) return null;
+        var tempDir = Path.Combine(Path.GetTempPath(), "nomeroff_upload_" + Guid.NewGuid().ToString("N"));
         try
         {
-            using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(15) };
-            using var content = new MultipartFormDataContent();
-            content.Add(new StreamContent(videoStream), "file", fileName);
+            Directory.CreateDirectory(tempDir);
+            var ext = Path.GetExtension(fileName);
+            if (string.IsNullOrEmpty(ext)) ext = ".mp4";
+            var videoPath = Path.Combine(tempDir, "video" + ext);
 
             progress?.Report(new VideoProcessProgress
             {
                 Stage = "upload",
-                Message = "Загрузка видео на сервер...",
+                Message = "Сохранение видео...",
                 Percent = 0
             });
 
-            using var request = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/api/process-video?intervalSec={intervalSec}")
-            {
-                Content = content
-            };
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger?.LogWarning("ProcessVideoAsync: HTTP {Status}", response.StatusCode);
-                return null;
-            }
+            await using (var fs = File.Create(videoPath))
+                await videoStream.CopyToAsync(fs, ct);
 
-            return await ReadNdjsonVideoResponseAsync(response, progress, ct);
+            return await RunVideoProcessorAsync(videoPath, intervalSec, progress, ct, deleteTempDirOnExit: false);
         }
         catch (InvalidOperationException)
         {
@@ -292,62 +283,96 @@ public class RecordsService
             _logger?.LogError(ex, "ProcessVideoAsync failed");
             return null;
         }
+        finally
+        {
+            try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); } catch { /* ignore */ }
+        }
     }
 
-    private async Task<ProcessVideoResponse?> ReadNdjsonVideoResponseAsync(
-        HttpResponseMessage response,
+    private async Task<ProcessVideoResponse?> RunVideoProcessorAsync(
+        string videoPath,
+        int intervalSec,
         IProgress<VideoProcessProgress>? progress,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool deleteTempDirOnExit)
     {
-        var mediaType = response.Content.Headers.ContentType?.MediaType ?? "";
-        if (mediaType.Contains("json", StringComparison.OrdinalIgnoreCase) &&
-            !mediaType.Contains("ndjson", StringComparison.OrdinalIgnoreCase) &&
-            !mediaType.Contains("x-ndjson", StringComparison.OrdinalIgnoreCase))
-        {
-            return await response.Content.ReadFromJsonAsync<ProcessVideoResponse>(cancellationToken: ct);
-        }
-
-        await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        using var reader = new StreamReader(stream);
         ProcessVideoResponse? result = null;
         string? error = null;
 
-        while (true)
-        {
-            ct.ThrowIfCancellationRequested();
-            var line = await reader.ReadLineAsync(ct);
-            if (line == null) break;
-            if (string.IsNullOrWhiteSpace(line)) continue;
-
-            using var doc = JsonDocument.Parse(line);
-            var root = doc.RootElement;
-            var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
-
-            if (type == "progress")
+        await _videoProcessor.ProcessAsync(
+            videoPath,
+            intervalSec,
+            async (payload, token) =>
             {
-                progress?.Report(new VideoProcessProgress
+                if (payload is VideoProcessEmitResult typed)
                 {
-                    Stage = root.TryGetProperty("stage", out var s) ? s.GetString() ?? "" : "",
-                    Message = root.TryGetProperty("message", out var m) ? m.GetString() ?? "" : "",
-                    Percent = root.TryGetProperty("percent", out var p) ? p.GetInt32() : 0,
-                    Current = root.TryGetProperty("current", out var c) ? c.GetInt32() : 0,
-                    Total = root.TryGetProperty("total", out var tot) ? tot.GetInt32() : 0
-                });
-            }
-            else if (type == "error")
-            {
-                error = root.TryGetProperty("message", out var em) ? em.GetString() : "Ошибка обработки видео";
-                _logger?.LogWarning("ProcessVideo: server error={Error}", error);
-                break;
-            }
-            else if (type == "result")
-            {
-                result = JsonSerializer.Deserialize<ProcessVideoResponse>(line, new JsonSerializerOptions
+                    result = new ProcessVideoResponse
+                    {
+                        TotalFrames = typed.TotalFrames,
+                        IntervalSec = typed.IntervalSec,
+                        Results = typed.Results.Select(fr => new ProcessVideoFrameResult
+                        {
+                            TimeSec = fr.TimeSec,
+                            ImageBase64 = fr.ImageBase64,
+                            Latitude = fr.Latitude,
+                            Longitude = fr.Longitude,
+                            OverlayTimeUtc = fr.OverlayTimeUtc,
+                            Plates = fr.Plates.Select(p => new ProcessVideoPlateResult
+                            {
+                                Plate = p.Plate,
+                                Confidence = p.Confidence,
+                                PlateImageBase64 = p.PlateImageBase64
+                            }).ToList()
+                        }).ToList()
+                    };
+                    _logger?.LogInformation(
+                        "ProcessVideo result: frames={Frames}, gpsFrames={Gps}/{GpsOk}, plates={Plates}",
+                        result.Results.Count,
+                        result.Results.Count(r => r.Latitude.HasValue && r.Longitude.HasValue),
+                        typed.GpsOkCount,
+                        result.Results.Sum(r => r.Plates.Count));
+                    return;
+                }
+
+                var line = JsonSerializer.Serialize(payload);
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+                var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
+
+                if (type == "progress")
                 {
-                    PropertyNameCaseInsensitive = true
-                });
-            }
-        }
+                    progress?.Report(new VideoProcessProgress
+                    {
+                        Stage = root.TryGetProperty("stage", out var s) ? s.GetString() ?? "" : "",
+                        Message = root.TryGetProperty("message", out var m) ? m.GetString() ?? "" : "",
+                        Percent = root.TryGetProperty("percent", out var p) ? p.GetInt32() : 0,
+                        Current = root.TryGetProperty("current", out var c) ? c.GetInt32() : 0,
+                        Total = root.TryGetProperty("total", out var tot) ? tot.GetInt32() : 0
+                    });
+                }
+                else if (type == "error")
+                {
+                    error = root.TryGetProperty("message", out var em) ? em.GetString() : "Ошибка обработки видео";
+                    _logger?.LogWarning("ProcessVideo: error={Error}", error);
+                }
+                else if (type == "result")
+                {
+                    // Совместимость со старым NDJSON { type:result, ... }
+                    result = JsonSerializer.Deserialize<ProcessVideoResponse>(line, VideoJsonOpts);
+                    if (result != null)
+                    {
+                        var gpsN = result.Results.Count(r => r.Latitude.HasValue && r.Longitude.HasValue);
+                        _logger?.LogInformation(
+                            "ProcessVideo result(json): frames={Frames}, gpsFrames={Gps}, plates={Plates}",
+                            result.Results.Count, gpsN,
+                            result.Results.Sum(r => r.Plates.Count));
+                    }
+                }
+
+                await Task.CompletedTask;
+            },
+            ct,
+            deleteTempDirOnExit);
 
         if (error != null)
             throw new InvalidOperationException(error);

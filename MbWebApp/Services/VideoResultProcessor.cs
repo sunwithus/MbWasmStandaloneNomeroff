@@ -11,6 +11,7 @@ public sealed class VideoPlateHit
     public double? Longitude { get; set; }
     public bool IsInWatchlist { get; set; }
     public bool IsDuplicate { get; set; }
+    public double Confidence { get; set; }
 }
 
 public sealed class VideoProcessSummary
@@ -53,6 +54,8 @@ internal sealed class PendingStemSave
     public double? Lon;
     public string? TimeUtc;
     public string? ImageBase64;
+    public string? PlateImageBase64;
+    public double Confidence;
     public bool HasGps;
 }
 
@@ -110,9 +113,9 @@ public class VideoResultProcessor
             var frameLon = fr.Longitude ?? lastLon;
             var hasGps = frameLat.HasValue && frameLon.HasValue;
 
-            foreach (var plate in fr.Plates.Where(p => !string.IsNullOrWhiteSpace(p)))
+            foreach (var plateItem in fr.Plates.Where(p => !string.IsNullOrWhiteSpace(p.Plate)))
             {
-                var plateNorm = PlateAlphabet.Normalize(plate);
+                var plateNorm = PlateAlphabet.Normalize(plateItem.Plate);
                 if (!PlateAlphabet.LooksLikeRuPlate(plateNorm)
                     && PlateAlphabet.TryFixMilitaryWithLeadingLetter(plateNorm) is { } mil)
                     plateNorm = mil;
@@ -120,6 +123,7 @@ public class VideoResultProcessor
                 var isInWatchlist = watchSet.Contains(plateNorm);
                 var stem = PlateAlphabet.DedupStem(plateNorm);
                 var isDup = pending.ContainsKey(stem);
+                var conf = plateItem.Confidence > 0 ? plateItem.Confidence : 1.0;
 
                 outcome.Hits.Add(new VideoPlateHit
                 {
@@ -128,7 +132,8 @@ public class VideoResultProcessor
                     Latitude = frameLat,
                     Longitude = frameLon,
                     IsInWatchlist = isInWatchlist,
-                    IsDuplicate = isDup
+                    IsDuplicate = isDup,
+                    Confidence = conf
                 });
 
                 if (isInWatchlist && !isDup)
@@ -153,23 +158,51 @@ public class VideoResultProcessor
                         Lon = frameLon,
                         TimeUtc = timeUtc,
                         ImageBase64 = fr.ImageBase64,
+                        PlateImageBase64 = plateItem.PlateImageBase64,
+                        Confidence = conf,
                         HasGps = hasGps
                     };
                     continue;
                 }
 
-                // Лучше: длиннее (полный регион) или то же длина — более позднее чтение
-                var take = plateNorm.Length > cur.Plate.Length
-                           || (plateNorm.Length == cur.Plate.Length && fr.TimeSec >= cur.TimeSec);
-                if (!take) continue;
+                // Лучше: выше conf, иначе длиннее (полный регион), иначе более позднее чтение
+                var take = conf > cur.Confidence + 0.02
+                           || (Math.Abs(conf - cur.Confidence) <= 0.02 && plateNorm.Length > cur.Plate.Length)
+                           || (Math.Abs(conf - cur.Confidence) <= 0.02
+                               && plateNorm.Length == cur.Plate.Length
+                               && fr.TimeSec >= cur.TimeSec);
+                if (!take)
+                {
+                    // Даже если текст не берём — GPS с кадра не теряем
+                    if (hasGps && !cur.HasGps)
+                    {
+                        cur.Lat = frameLat;
+                        cur.Lon = frameLon;
+                        cur.HasGps = true;
+                    }
+                    if (string.IsNullOrEmpty(cur.PlateImageBase64) && !string.IsNullOrEmpty(plateItem.PlateImageBase64)
+                        && string.Equals(cur.Plate, plateNorm, StringComparison.Ordinal))
+                        cur.PlateImageBase64 = plateItem.PlateImageBase64;
+                    continue;
+                }
 
+                var plateChanged = !string.Equals(cur.Plate, plateNorm, StringComparison.Ordinal);
                 cur.Plate = plateNorm;
                 cur.TimeSec = fr.TimeSec;
-                cur.Lat = frameLat;
-                cur.Lon = frameLon;
                 cur.TimeUtc = timeUtc;
                 cur.ImageBase64 = fr.ImageBase64;
-                cur.HasGps = hasGps;
+                cur.Confidence = conf;
+                // Кроп только от того же текста; при смене номера — не оставляем чужой кроп
+                cur.PlateImageBase64 = plateChanged
+                    ? plateItem.PlateImageBase64
+                    : (plateItem.PlateImageBase64 ?? cur.PlateImageBase64);
+                // GPS: не затирать хорошие координаты кадром без OSD
+                if (hasGps)
+                {
+                    cur.Lat = frameLat;
+                    cur.Lon = frameLon;
+                    cur.HasGps = true;
+                }
             }
         }
 
@@ -191,10 +224,12 @@ public class VideoResultProcessor
                 var dto = new RecordDto
                 {
                     ScreenshotBase64 = p.ImageBase64,
+                    PlateImageBase64 = p.PlateImageBase64,
                     Latitude = p.Lat,
                     Longitude = p.Lon,
                     TimeUtc = p.TimeUtc,
                     CarNumber = p.Plate,
+                    Confidence = p.Confidence,
                     DeviceId = string.IsNullOrEmpty(req.DeviceName) ? null : req.DeviceName,
                     Source = req.Source,
                     Db = dbName
@@ -202,7 +237,9 @@ public class VideoResultProcessor
                 var saved = await _records.SaveRecordAsync(dto, ct);
                 if (!saved) saveFailures++;
                 else if (p.HasGps) savedWithGps++;
-                _logger.LogInformation("Video save: plate={Plate}, saved={Saved}, gps={HasGps}", p.Plate, saved, p.HasGps);
+                _logger.LogInformation(
+                    "Video save: plate={Plate}, conf={Conf:P0}, saved={Saved}, gps={HasGps}, hasPlateCrop={HasCrop}",
+                    p.Plate, p.Confidence, saved, p.HasGps, !string.IsNullOrEmpty(p.PlateImageBase64));
             }
         }
 
@@ -210,8 +247,8 @@ public class VideoResultProcessor
         {
             TotalFrames = api.TotalFrames,
             IntervalSec = api.IntervalSec,
-            FramesWithPlates = api.Results.Count(r => r.Plates.Any(p => !string.IsNullOrWhiteSpace(p))),
-            TotalPlates = api.Results.Sum(r => r.Plates.Count(p => !string.IsNullOrWhiteSpace(p))),
+            FramesWithPlates = api.Results.Count(r => r.Plates.Any(p => !string.IsNullOrWhiteSpace(p.Plate))),
+            TotalPlates = api.Results.Sum(r => r.Plates.Count(p => !string.IsNullOrWhiteSpace(p.Plate))),
             UniquePlates = outcome.Hits.Select(v => v.Plate).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
             GpsFrames = api.Results.Count(r => r.Latitude.HasValue && r.Longitude.HasValue),
             SavedWithGps = savedWithGps,

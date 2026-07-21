@@ -22,6 +22,8 @@ public class PlateResult
     public double Confidence { get; set; }
     [JsonPropertyName("bbox")]
     public int[] Bbox { get; set; } = Array.Empty<int>();
+    [JsonPropertyName("plate_image_base64")]
+    public string? PlateImageBase64 { get; set; }
     public bool IsInWatchlist { get; set; }
     public bool IsDuplicate { get; set; }
 }
@@ -54,12 +56,22 @@ public class WatchlistUpdateResponse
     public int Count { get; set; }
 }
 
+public class ProcessVideoPlateResult
+{
+    [JsonPropertyName("plate")]
+    public string Plate { get; set; } = "";
+    [JsonPropertyName("confidence")]
+    public double Confidence { get; set; } = 1.0;
+    [JsonPropertyName("plateImageBase64")]
+    public string? PlateImageBase64 { get; set; }
+}
+
 public class ProcessVideoFrameResult
 {
     [JsonPropertyName("timeSec")]
     public double TimeSec { get; set; }
     [JsonPropertyName("plates")]
-    public List<string> Plates { get; set; } = new();
+    public List<ProcessVideoPlateResult> Plates { get; set; } = new();
     [JsonPropertyName("imageBase64")]
     public string? ImageBase64 { get; set; }
     [JsonPropertyName("latitude")]

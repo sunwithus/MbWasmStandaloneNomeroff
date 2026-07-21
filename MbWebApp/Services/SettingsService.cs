@@ -38,16 +38,17 @@ public class SettingsService
         _js = js;
         _configuration = configuration;
         _logger = logger;
-        // Серверные дефолты из appsettings / env; localStorage перекрывает при наличии
-        var urls = configuration["Urls"] ?? "http://localhost:5555";
-        var hostHint = urls.Contains("0.0.0.0")
-            ? urls.Replace("0.0.0.0", "localhost")
-            : urls;
-        hostHint = hostHint.TrimEnd('/');
+        // Только appsettings / env — не localStorage (там часто старый :5060 после переноса)
         DefaultApiBaseUrl = (configuration["NomeroffApiBaseUrl"] ?? "http://127.0.0.1:8000").TrimEnd('/');
-        DefaultRecordsApiBaseUrl = hostHint;
-        DefaultGpsApiBaseUrl = hostHint;
-        DefaultVideoApiBaseUrl = hostHint;
+        var appBase = (configuration["AppBaseUrl"] ?? "").Trim().TrimEnd('/');
+        if (string.IsNullOrEmpty(appBase))
+        {
+            var urls = configuration["Urls"] ?? "http://127.0.0.1:5555";
+            appBase = urls.Replace("0.0.0.0", "127.0.0.1", StringComparison.Ordinal).TrimEnd('/');
+        }
+        DefaultRecordsApiBaseUrl = appBase;
+        DefaultGpsApiBaseUrl = appBase;
+        DefaultVideoApiBaseUrl = appBase;
     }
 
     private const string KeySaveVideoToDb = "NomeroffSaveVideoToDb";
@@ -67,20 +68,11 @@ public class SettingsService
         await _js.InvokeVoidAsync("settingsSet", KeySaveVideoToDb, value ? "1" : "0");
     }
 
-    public async Task<string> GetApiBaseUrlAsync()
+    /// <summary>OCR URL из appsettings NomeroffApiBaseUrl (localStorage не используется).</summary>
+    public Task<string> GetApiBaseUrlAsync()
     {
-        if (_cachedApiBaseUrl != null) return _cachedApiBaseUrl;
-        try
-        {
-            var url = await _js.InvokeAsync<string?>("settingsGet", KeyApiBaseUrl);
-            _cachedApiBaseUrl = string.IsNullOrWhiteSpace(url) ? DefaultApiBaseUrl : url.TrimEnd('/');
-            return _cachedApiBaseUrl;
-        }
-        catch
-        {
-            _cachedApiBaseUrl = DefaultApiBaseUrl;
-            return _cachedApiBaseUrl;
-        }
+        _cachedApiBaseUrl = DefaultApiBaseUrl;
+        return Task.FromResult(DefaultApiBaseUrl);
     }
 
     public async Task<string> GetDeviceNameAsync()
@@ -182,35 +174,44 @@ public class SettingsService
         await _js.InvokeVoidAsync("settingsSet", KeyCameraDeviceId, deviceId ?? "");
     }
 
-    public async Task<string> GetRecordsApiBaseUrlAsync()
+    /// <summary>Старые порты отдельных сервисов — игнорировать и переписать на дефолт.</summary>
+    private static bool IsLegacyServiceUrl(string url) =>
+        url.Contains(":5060", StringComparison.OrdinalIgnoreCase)
+        || url.Contains(":5552", StringComparison.OrdinalIgnoreCase)
+        || url.Contains(":5553", StringComparison.OrdinalIgnoreCase)
+        || url.Contains(":5000", StringComparison.OrdinalIgnoreCase)
+        || url.Contains(":5001", StringComparison.OrdinalIgnoreCase);
+
+    private async Task<string> ResolveServiceUrlAsync(string key, string defaultUrl)
     {
         try
         {
-            var v = await _js.InvokeAsync<string?>("settingsGet", KeyRecordsApiBaseUrl);
-            return string.IsNullOrWhiteSpace(v) ? DefaultRecordsApiBaseUrl : v.TrimEnd('/');
+            var v = await _js.InvokeAsync<string?>("settingsGet", key);
+            if (string.IsNullOrWhiteSpace(v))
+                return defaultUrl;
+            v = v.TrimEnd('/');
+            if (IsLegacyServiceUrl(v))
+            {
+                _logger?.LogWarning("localStorage {Key}={Url} — устаревший порт, сброс на {Default}", key, v, defaultUrl);
+                try { await _js.InvokeVoidAsync("settingsSet", key, defaultUrl); } catch { /* ignore */ }
+                return defaultUrl;
+            }
+            return v;
         }
-        catch { return DefaultRecordsApiBaseUrl; }
-    }
-
-    public async Task SetRecordsApiBaseUrlAsync(string url)
-    {
-        await _js.InvokeVoidAsync("settingsSet", KeyRecordsApiBaseUrl, string.IsNullOrWhiteSpace(url) ? DefaultRecordsApiBaseUrl : url.TrimEnd('/'));
-    }
-
-    public async Task<string> GetGpsApiBaseUrlAsync()
-    {
-        try
+        catch
         {
-            var v = await _js.InvokeAsync<string?>("settingsGet", KeyGpsApiBaseUrl);
-            return string.IsNullOrWhiteSpace(v) ? DefaultGpsApiBaseUrl : v.TrimEnd('/');
+            return defaultUrl;
         }
-        catch { return DefaultGpsApiBaseUrl; }
     }
 
-    public async Task SetGpsApiBaseUrlAsync(string url)
-    {
-        await _js.InvokeVoidAsync("settingsSet", KeyGpsApiBaseUrl, string.IsNullOrWhiteSpace(url) ? DefaultGpsApiBaseUrl : url.TrimEnd('/'));
-    }
+    /// <summary>Всегда из appsettings AppBaseUrl — localStorage игнорируется.</summary>
+    public Task<string> GetRecordsApiBaseUrlAsync() => Task.FromResult(DefaultRecordsApiBaseUrl);
+
+    public Task SetRecordsApiBaseUrlAsync(string url) => Task.CompletedTask;
+
+    public Task<string> GetGpsApiBaseUrlAsync() => Task.FromResult(DefaultGpsApiBaseUrl);
+
+    public Task SetGpsApiBaseUrlAsync(string url) => Task.CompletedTask;
 
     public async Task<int> GetDedupIntervalSecAsync()
     {
@@ -260,20 +261,29 @@ public class SettingsService
         await _js.InvokeVoidAsync("settingsSet", KeyCurrentDbDate, date ?? "");
     }
 
-    public async Task<string> GetVideoApiBaseUrlAsync()
+    public Task<string> GetVideoApiBaseUrlAsync() => Task.FromResult(DefaultVideoApiBaseUrl);
+
+    public Task SetVideoApiBaseUrlAsync(string url) => Task.CompletedTask;
+
+    /// <summary>
+    /// Сбросить URL OCR/GPS/БД/видео на дефолты из appsettings.
+    /// Нужно после переноса: в localStorage могли остаться старые порты (5060, 5552…).
+    /// </summary>
+    public async Task ResetServiceUrlsToDefaultsAsync()
     {
-        try
+        _cachedApiBaseUrl = DefaultApiBaseUrl;
+        foreach (var key in new[] { KeyApiBaseUrl, KeyRecordsApiBaseUrl, KeyGpsApiBaseUrl, KeyVideoApiBaseUrl })
         {
-            var v = await _js.InvokeAsync<string?>("settingsGet", KeyVideoApiBaseUrl);
-            return string.IsNullOrWhiteSpace(v) ? DefaultVideoApiBaseUrl : v.TrimEnd('/');
+            try { await _js.InvokeVoidAsync("settingsRemove", key); } catch { /* старый JS без remove */ }
         }
-        catch { return DefaultVideoApiBaseUrl; }
+        await _js.InvokeVoidAsync("settingsSet", KeyApiBaseUrl, DefaultApiBaseUrl);
+        await _js.InvokeVoidAsync("settingsSet", KeyRecordsApiBaseUrl, DefaultRecordsApiBaseUrl);
+        await _js.InvokeVoidAsync("settingsSet", KeyGpsApiBaseUrl, DefaultGpsApiBaseUrl);
+        await _js.InvokeVoidAsync("settingsSet", KeyVideoApiBaseUrl, DefaultVideoApiBaseUrl);
     }
 
-    public async Task SetVideoApiBaseUrlAsync(string url)
-    {
-        await _js.InvokeVoidAsync("settingsSet", KeyVideoApiBaseUrl, string.IsNullOrWhiteSpace(url) ? DefaultVideoApiBaseUrl : url.TrimEnd('/'));
-    }
+    public (string Ocr, string App, string Video) GetDefaultServiceUrls() =>
+        (DefaultApiBaseUrl, DefaultRecordsApiBaseUrl, DefaultVideoApiBaseUrl);
 
     public void InvalidateCache()
     {
