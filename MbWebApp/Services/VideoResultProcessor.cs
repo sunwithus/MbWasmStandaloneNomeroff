@@ -180,22 +180,16 @@ public class VideoResultProcessor
                         cur.Lon = frameLon;
                         cur.HasGps = true;
                     }
-                    if (string.IsNullOrEmpty(cur.PlateImageBase64) && !string.IsNullOrEmpty(plateItem.PlateImageBase64)
-                        && string.Equals(cur.Plate, plateNorm, StringComparison.Ordinal))
-                        cur.PlateImageBase64 = plateItem.PlateImageBase64;
                     continue;
                 }
 
-                var plateChanged = !string.Equals(cur.Plate, plateNorm, StringComparison.Ordinal);
                 cur.Plate = plateNorm;
                 cur.TimeSec = fr.TimeSec;
                 cur.TimeUtc = timeUtc;
                 cur.ImageBase64 = fr.ImageBase64;
                 cur.Confidence = conf;
-                // Кроп только от того же текста; при смене номера — не оставляем чужой кроп
-                cur.PlateImageBase64 = plateChanged
-                    ? plateItem.PlateImageBase64
-                    : (plateItem.PlateImageBase64 ?? cur.PlateImageBase64);
+                // Атомарно: номер + кроп одной детекции (при смене текста старый кроп сбрасываем)
+                cur.PlateImageBase64 = plateItem.PlateImageBase64;
                 // GPS: не затирать хорошие координаты кадром без OSD
                 if (hasGps)
                 {

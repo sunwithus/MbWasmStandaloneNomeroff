@@ -137,50 +137,36 @@ public sealed class VideoFileProcessor
                         _logger.LogWarning("process-video: GpsOcr выключен (GpsOcr:Enabled=false) — координаты из OSD не читаются");
                     }
 
-                    // plate -> best confidence + crop.
-                    // Кроп номера берём ТОЛЬКО с полного кадра: ROI/crop/invert в других
-                    // координатах и часто подмешивают чужую зону к другому тексту.
+                    // plate -> best confidence + crop как атомарная пара одной детекции.
+                    // Никогда не подмешиваем кроп от другого чтения (даже с тем же текстом
+                    // с другого прохода) — иначе в БД текст одного номера и картинка другого.
                     var plateBest = new Dictionary<string, (double Conf, string? Crop)>(StringComparer.Ordinal);
-                    void Accept(IEnumerable<(string Plate, double Confidence, string? Crop)> found, bool takeCrop)
+                    void Accept(IEnumerable<(string Plate, double Confidence, string? Crop)> found)
                     {
                         foreach (var (plate, conf, crop) in found)
                         {
                             if (!plateBest.TryGetValue(plate, out var prev) || conf > prev.Conf)
-                            {
-                                string? newCrop;
-                                if (takeCrop)
-                                    newCrop = crop ?? prev.Crop;
-                                else
-                                    newCrop = prev.Crop; // текст с ROI, кроп не трогаем
-                                plateBest[plate] = (conf, newCrop);
-                            }
-                            else if (takeCrop && crop != null && prev.Crop == null)
-                            {
-                                plateBest[plate] = (prev.Conf, crop);
-                            }
+                                plateBest[plate] = (conf, crop);
                         }
                     }
 
                     var ocrBytes = plateCropRatio > 0.001
                         ? PlateFramePrep.CropBottom(bytes, plateCropRatio)
                         : bytes;
-                    // Нижний crop — тоже чужие координаты bbox/zone; только текст
-                    Accept(await RecognizePlatesAsync(http, ocrBytes, minConfidence, ct, includeCrop: false), takeCrop: false);
-
-                    // Полный кадр — источник кропа (zone/bbox совпадают с этим JPEG)
-                    Accept(await RecognizePlatesAsync(http, bytes, minConfidence, ct, includeCrop: true), takeCrop: true);
+                    Accept(await RecognizePlatesAsync(http, ocrBytes, minConfidence, ct));
+                    Accept(await RecognizePlatesAsync(http, bytes, minConfidence, ct));
 
                     if (useRoiFallback)
                     {
                         var roiBytes = PlateFramePrep.RoadRoiUpscaled(bytes, bottomCropRatio: Math.Max(plateCropRatio, 0.12));
-                        Accept(await RecognizePlatesAsync(http, roiBytes, roiMinConfidence, ct, includeCrop: false), takeCrop: false);
-                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.ContrastBoost(roiBytes), roiMinConfidence, ct, includeCrop: false), takeCrop: false);
-                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.Invert(roiBytes), minConfidence, ct, militaryLookalikeFix: true, includeCrop: false), takeCrop: false);
+                        Accept(await RecognizePlatesAsync(http, roiBytes, roiMinConfidence, ct));
+                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.ContrastBoost(roiBytes), roiMinConfidence, ct));
+                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.Invert(roiBytes), minConfidence, ct, militaryLookalikeFix: true));
                     }
 
                     if (plateBest.Count == 0 && plateCropRatio < 0.18)
                     {
-                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.CropBottom(bytes, 0.18), minConfidence, ct, includeCrop: false), takeCrop: false);
+                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.CropBottom(bytes, 0.18), minConfidence, ct));
                     }
 
                     var plates = PlateAlphabet.CollapseNearDuplicates(plateBest, maxDistance: 1)

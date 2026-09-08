@@ -166,19 +166,8 @@ public static class PlateAlphabet
                 || (plate.Length > prev.Plate.Length && meta.Confidence >= prev.Conf - 0.08)
                 || (plate.Length == prev.Plate.Length && meta.Confidence > prev.Conf))
             {
-                // При смене текста на стволе не тащим чужой кроп
-                var crop = string.Equals(prev.Plate, plate, StringComparison.Ordinal)
-                    ? (meta.PlateImageBase64 ?? prev.Crop)
-                    : meta.PlateImageBase64;
-                if (!byStem.ContainsKey(stem))
-                    crop = meta.PlateImageBase64;
-                byStem[stem] = (plate, meta.Confidence, crop);
-            }
-            else if (meta.PlateImageBase64 != null
-                     && prev.Crop == null
-                     && string.Equals(prev.Plate, plate, StringComparison.Ordinal))
-            {
-                byStem[stem] = (prev.Plate, prev.Conf, meta.PlateImageBase64);
+                // Кроп только победившей детекции; чужой/старый кроп не тащим
+                byStem[stem] = (plate, meta.Confidence, meta.PlateImageBase64);
             }
         }
 
