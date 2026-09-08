@@ -418,40 +418,36 @@ WHERE RDB$RELATION_NAME = 'SPR_SP_FOTO_TABLE' AND RDB$FIELD_NAME = 'F_PLATE'", c
 
         var hasFull = screenshotBlob != null && screenshotBlob.Length > 0;
         var hasPlate = plateBlob != null && plateBlob.Length > 0;
-        if (hasFull || hasPlate)
+
+        // Строку в SPR_SP_FOTO_TABLE вставляем ВСЕГДА, даже если оба блоба пустые.
+        // Иначе в SPR_SPEECH_TABLE запись есть, а в фотоинформации её нет вовсе —
+        // именно так выглядело «нет авто в фотоинформации, а номер в БД есть».
+        if (!hasFull && !hasPlate)
+        {
+            _logger?.LogWarning(
+                "SaveRecordAsync: нет ни кадра, ни кропа номера — вставляем пустую строку фото (id={Id})",
+                newKey);
+        }
+        else
         {
             _logger?.LogInformation(
                 "SaveRecordAsync: inserting foto full={Full} plate={Plate}",
                 screenshotBlob?.Length ?? 0, plateBlob?.Length ?? 0);
-
-            if (hasPlate)
-            {
-                var fotoSql = @"
-                    INSERT INTO SPR_SP_FOTO_TABLE (S_INCKEY, F_IMAGE, F_PLATE)
-                    VALUES (@Key, @Image, @Plate)";
-                using (var cmd = new IBCommand(fotoSql, conn, transaction))
-                {
-                    cmd.Parameters.Add("@Key", IBDbType.BigInt).Value = newKey;
-                    cmd.Parameters.Add("@Image", IBDbType.Binary).Value =
-                        (object?)screenshotBlob ?? DBNull.Value;
-                    cmd.Parameters.Add("@Plate", IBDbType.Binary).Value = plateBlob!;
-                    await cmd.ExecuteNonQueryAsync(ct);
-                }
-            }
-            else
-            {
-                var fotoSql = @"
-                    INSERT INTO SPR_SP_FOTO_TABLE (S_INCKEY, F_IMAGE)
-                    VALUES (@Key, @Image)";
-                using (var cmd = new IBCommand(fotoSql, conn, transaction))
-                {
-                    cmd.Parameters.Add("@Key", IBDbType.BigInt).Value = newKey;
-                    cmd.Parameters.Add("@Image", IBDbType.Binary).Value = screenshotBlob!;
-                    await cmd.ExecuteNonQueryAsync(ct);
-                }
-            }
-            _logger?.LogInformation("SaveRecordAsync: SPR_SP_FOTO_TABLE OK");
         }
+
+        var fotoSql = @"
+            INSERT INTO SPR_SP_FOTO_TABLE (S_INCKEY, F_IMAGE, F_PLATE)
+            VALUES (@Key, @Image, @Plate)";
+        using (var cmd = new IBCommand(fotoSql, conn, transaction))
+        {
+            cmd.Parameters.Add("@Key", IBDbType.BigInt).Value = newKey;
+            cmd.Parameters.Add("@Image", IBDbType.Binary).Value =
+                hasFull ? screenshotBlob! : (object)DBNull.Value;
+            cmd.Parameters.Add("@Plate", IBDbType.Binary).Value =
+                hasPlate ? plateBlob! : (object)DBNull.Value;
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        _logger?.LogInformation("SaveRecordAsync: SPR_SP_FOTO_TABLE OK");
 
         transaction.Commit();
         _logger?.LogInformation("SaveRecordAsync: success, id={Id}", newKey);

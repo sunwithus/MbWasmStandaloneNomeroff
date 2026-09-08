@@ -227,14 +227,14 @@ public class RecordsService
 
     public async Task<ProcessVideoResponse?> ProcessVideoFromPathAsync(
         string videoPath,
-        int intervalSec,
+        double sampleFps,
         IProgress<VideoProcessProgress>? progress = null,
         CancellationToken ct = default)
     {
         try
         {
             // В том же процессе (без HTTP на старый :5060 из localStorage)
-            return await RunVideoProcessorAsync(videoPath, intervalSec, progress, ct, deleteTempDirOnExit: true);
+            return await RunVideoProcessorAsync(videoPath, sampleFps, progress, ct);
         }
         catch (InvalidOperationException)
         {
@@ -250,7 +250,7 @@ public class RecordsService
     public async Task<ProcessVideoResponse?> ProcessVideoAsync(
         Stream videoStream,
         string fileName,
-        int intervalSec,
+        double sampleFps,
         IProgress<VideoProcessProgress>? progress = null,
         CancellationToken ct = default)
     {
@@ -272,7 +272,7 @@ public class RecordsService
             await using (var fs = File.Create(videoPath))
                 await videoStream.CopyToAsync(fs, ct);
 
-            return await RunVideoProcessorAsync(videoPath, intervalSec, progress, ct, deleteTempDirOnExit: false);
+            return await RunVideoProcessorAsync(videoPath, sampleFps, progress, ct);
         }
         catch (InvalidOperationException)
         {
@@ -291,40 +291,21 @@ public class RecordsService
 
     private async Task<ProcessVideoResponse?> RunVideoProcessorAsync(
         string videoPath,
-        int intervalSec,
+        double sampleFps,
         IProgress<VideoProcessProgress>? progress,
-        CancellationToken ct,
-        bool deleteTempDirOnExit)
+        CancellationToken ct)
     {
         ProcessVideoResponse? result = null;
         string? error = null;
 
         await _videoProcessor.ProcessAsync(
             videoPath,
-            intervalSec,
+            new VideoProcessOptions { SampleFps = sampleFps },
             async (payload, token) =>
             {
                 if (payload is VideoProcessEmitResult typed)
                 {
-                    result = new ProcessVideoResponse
-                    {
-                        TotalFrames = typed.TotalFrames,
-                        IntervalSec = typed.IntervalSec,
-                        Results = typed.Results.Select(fr => new ProcessVideoFrameResult
-                        {
-                            TimeSec = fr.TimeSec,
-                            ImageBase64 = fr.ImageBase64,
-                            Latitude = fr.Latitude,
-                            Longitude = fr.Longitude,
-                            OverlayTimeUtc = fr.OverlayTimeUtc,
-                            Plates = fr.Plates.Select(p => new ProcessVideoPlateResult
-                            {
-                                Plate = p.Plate,
-                                Confidence = p.Confidence,
-                                PlateImageBase64 = p.PlateImageBase64
-                            }).ToList()
-                        }).ToList()
-                    };
+                    result = VideoEmitMapper.ToResponse(typed);
                     _logger?.LogInformation(
                         "ProcessVideo result: frames={Frames}, gpsFrames={Gps}/{GpsOk}, plates={Plates}",
                         result.Results.Count,
@@ -371,8 +352,7 @@ public class RecordsService
 
                 await Task.CompletedTask;
             },
-            ct,
-            deleteTempDirOnExit);
+            ct);
 
         if (error != null)
             throw new InvalidOperationException(error);

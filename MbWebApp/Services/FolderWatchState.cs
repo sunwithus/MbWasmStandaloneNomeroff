@@ -16,7 +16,10 @@ public sealed class FolderWatchConfig
     public string WatchFolder { get; set; } = @"D:\REG_VIDEO";
     public FolderAfterAction AfterAction { get; set; } = FolderAfterAction.Move;
     public string MoveSubfolder { get; set; } = "Processed";
+    /// <summary>Устаревшее: один кадр в N секунд. Используется, если SampleFps не задан.</summary>
     public int IntervalSec { get; set; } = 2;
+    /// <summary>Кадров в секунду на распознавание. Голосованию нужно &gt;= 2 кадра на машину.</summary>
+    public double SampleFps { get; set; } = 3.0;
     public bool SaveToDb { get; set; } = true;
     public int DedupIntervalSec { get; set; } = 300;
     public bool SkipSaveWithoutGps { get; set; }
@@ -96,6 +99,9 @@ public sealed class FolderWatchState
         {
             _config = Clone(cfg);
             _config.IntervalSec = Math.Clamp(_config.IntervalSec, 1, 60);
+            _config.SampleFps = _config.SampleFps > 0
+                ? Math.Clamp(_config.SampleFps, 0.05, 30.0)
+                : 0;
             _config.PollSeconds = Math.Clamp(_config.PollSeconds, 2, 120);
             _config.StableSeconds = Math.Clamp(_config.StableSeconds, 1, 30);
             if (string.IsNullOrWhiteSpace(_config.MoveSubfolder))
@@ -326,6 +332,7 @@ public sealed class FolderWatchState
         AfterAction = c.AfterAction,
         MoveSubfolder = c.MoveSubfolder,
         IntervalSec = c.IntervalSec,
+        SampleFps = c.SampleFps,
         SaveToDb = c.SaveToDb,
         DedupIntervalSec = c.DedupIntervalSec,
         SkipSaveWithoutGps = c.SkipSaveWithoutGps,

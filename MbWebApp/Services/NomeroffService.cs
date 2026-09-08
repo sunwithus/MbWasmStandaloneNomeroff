@@ -9,12 +9,14 @@ public class NomeroffService
     private readonly HttpClient _http;
     private readonly IJSRuntime _js;
     private readonly SettingsService _settings;
+    private readonly IConfiguration _config;
 
-    public NomeroffService(HttpClient http, IJSRuntime js, SettingsService settings)
+    public NomeroffService(HttpClient http, IJSRuntime js, SettingsService settings, IConfiguration config)
     {
         _http = http;
         _js = js;
         _settings = settings;
+        _config = config;
     }
 
     private async Task<string> GetBaseUrlAsync() => await _settings.GetApiBaseUrlAsync();
@@ -34,7 +36,15 @@ public class NomeroffService
     public async Task<ProcessFrameResponse?> ProcessFrameAsync(string imageBase64, CancellationToken ct = default)
     {
         var baseUrl = await GetBaseUrlAsync();
-        var request = new { image_base64 = imageBase64 };
+        var variants = (_config["PlateVariants"] ?? "full,crop,roi,roi_contrast")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var request = new
+        {
+            image_base64 = imageBase64,
+            variants,
+            min_ocr_confidence = _config.GetValue("PlateOcrMinConfidence", 0.55),
+            include_crop = true
+        };
         try
         {
             var response = await _http.PostAsJsonAsync($"{baseUrl}/api/process_frame", request, ct);

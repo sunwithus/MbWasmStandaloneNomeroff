@@ -42,7 +42,7 @@ public static class VideoEndpointExtensions
             "<li>POST /api/process-video</li><li>POST /api/process-video-path</li></ul></body></html>",
             "text/html; charset=utf-8"));
 
-        app.MapPost("/api/process-video", async (HttpRequest request, int intervalSec, VideoFileProcessor processor, ILoggerFactory loggerFactory, CancellationToken ct) =>
+        app.MapPost("/api/process-video", async (HttpRequest request, int? intervalSec, double? sampleFps, VideoFileProcessor processor, IConfiguration config, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("NomeroffVideo");
             if (!request.HasFormContentType)
@@ -53,14 +53,17 @@ public static class VideoEndpointExtensions
             if (file == null || file.Length == 0)
                 return Results.BadRequest("Файл не передан");
 
-            intervalSec = Math.Clamp(intervalSec, 1, 60);
-            logger.LogInformation("process-video: upload start, file={FileName}, size={Size}, interval={Interval}",
-                file.FileName, file.Length, intervalSec);
+            var options = ResolveOptions(config, intervalSec, sampleFps);
+            logger.LogInformation("process-video: upload start, file={FileName}, size={Size}, fps={Fps}",
+                file.FileName, file.Length, options.SampleFps);
 
             var tempDir = Path.Combine(Path.GetTempPath(), "nomeroff_video_" + Guid.NewGuid().ToString("N"));
             var ext = Path.GetExtension(file.FileName);
             if (string.IsNullOrEmpty(ext)) ext = ".mp4";
-            var videoPath = Path.Combine(tempDir, "video" + ext);
+            // Имя сохраняем: из него берётся время начала записи (NO<дата>-<время>)
+            var safeName = Path.GetFileName(file.FileName);
+            if (string.IsNullOrWhiteSpace(safeName)) safeName = "video" + ext;
+            var videoPath = Path.Combine(tempDir, safeName);
             Directory.CreateDirectory(tempDir);
             await using (var fs = File.Create(videoPath))
                 await file.CopyToAsync(fs, ct);
@@ -69,7 +72,7 @@ public static class VideoEndpointExtensions
             {
                 try
                 {
-                    await processor.ProcessAsync(videoPath, intervalSec, emit, token);
+                    await processor.ProcessAsync(videoPath, options, emit, token);
                 }
                 finally
                 {
@@ -78,7 +81,7 @@ public static class VideoEndpointExtensions
             });
         }).DisableAntiforgery();
 
-        app.MapPost("/api/process-video-path", async (ProcessVideoPathRequest? body, int intervalSec, VideoFileProcessor processor, ILoggerFactory loggerFactory, CancellationToken ct) =>
+        app.MapPost("/api/process-video-path", (ProcessVideoPathRequest? body, int? intervalSec, double? sampleFps, VideoFileProcessor processor, IConfiguration config, ILoggerFactory loggerFactory) =>
         {
             var logger = loggerFactory.CreateLogger("NomeroffVideo");
             if (body == null || string.IsNullOrWhiteSpace(body.Path))
@@ -88,16 +91,29 @@ public static class VideoEndpointExtensions
             if (!File.Exists(path))
                 return Results.NotFound($"Файл не найден: {path}");
 
-            intervalSec = Math.Clamp(intervalSec <= 0 ? 1 : intervalSec, 1, 60);
-            logger.LogInformation("process-video-path: {Path}, interval={Interval}", path, intervalSec);
+            var options = ResolveOptions(config, intervalSec, sampleFps);
+            logger.LogInformation("process-video-path: {Path}, fps={Fps}", path, options.SampleFps);
 
             return NdjsonStream(async (emit, token) =>
             {
-                await processor.ProcessAsync(path, intervalSec, emit, token);
+                await processor.ProcessAsync(path, options, emit, token);
             });
         }).DisableAntiforgery();
 
         return app;
+    }
+
+    /// <summary>
+    /// sampleFps — основной вход. intervalSec остаётся ради старого UI и означает
+    /// «один кадр в N секунд», то есть fps = 1/N.
+    /// </summary>
+    private static VideoProcessOptions ResolveOptions(IConfiguration config, int? intervalSec, double? sampleFps)
+    {
+        if (sampleFps is > 0)
+            return new VideoProcessOptions { SampleFps = Math.Clamp(sampleFps.Value, 0.05, 30.0) };
+        if (intervalSec is > 0)
+            return VideoProcessOptions.FromIntervalSec(intervalSec.Value);
+        return new VideoProcessOptions { SampleFps = config.GetValue("SampleFps", 3.0) };
     }
 
     private static IResult NdjsonStream(Func<Func<object, CancellationToken, Task>, CancellationToken, Task> run) =>

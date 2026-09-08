@@ -12,8 +12,8 @@ public sealed class NomeroffAppOptions
     /// <summary>Размер чанка кадров при обработке длинных роликов (не жёсткий лимит всей длины).</summary>
     public int MaxVideoFrames { get; set; } = 300;
 
-    /// <summary>Минимальный confidence OCR/детекции для принятия номера (0..1). На регистраторе типично 0.65–0.85.</summary>
-    public double PlateMinConfidence { get; set; } = 0.70;
+    /// <summary>Score детектора YOLO (не OCR). Фильтр по тексту — PlateOcrMinConfidence.</summary>
+    public double PlateMinConfidence { get; set; } = 0.60;
 
     public string NomeroffApiBaseUrl { get; set; } = "http://127.0.0.1:8000";
 
@@ -29,6 +29,8 @@ public sealed class FolderWatchOptions
     public string AfterAction { get; set; } = "Move";
     public string MoveSubfolder { get; set; } = "Processed";
     public int IntervalSec { get; set; } = 2;
+    /// <summary>Кадров в секунду на распознавание. Если &gt; 0, перекрывает IntervalSec.</summary>
+    public double SampleFps { get; set; } = 3.0;
     public bool SaveToDb { get; set; } = true;
     public int DedupIntervalSec { get; set; } = 300;
     public bool SkipSaveWithoutGps { get; set; }

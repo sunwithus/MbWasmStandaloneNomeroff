@@ -84,6 +84,48 @@ public static class PlateAlphabet
         LooksLikeCivilianRuPlate(plate) || LooksLikeMilitaryRuPlate(plate);
 
     /// <summary>
+    /// Коды регионов РФ: двузначные 01–99 плюс реально выданные трёхзначные серии.
+    /// Список закрытый — он и отсекает фантомы вида …356 / …107 / …135, у которых
+    /// формат верный, а региона такого не существует.
+    /// </summary>
+    private static readonly HashSet<string> ValidRegions = BuildValidRegions();
+
+    private static HashSet<string> BuildValidRegions()
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 1; i <= 99; i++)
+            set.Add(i.ToString("00"));
+        foreach (var code in new[]
+                 {
+                     "102", "103", "104", "105", "106", "109", "111", "113", "116", "118",
+                     "121", "123", "124", "125", "126", "128", "130", "134", "136", "138",
+                     "142", "150", "152", "154", "156", "158", "159", "161", "163", "164",
+                     "173", "174", "177", "178", "186", "190", "196", "197", "199",
+                     "702", "716", "725", "750", "754", "763", "777", "790", "793", "797",
+                     "799", "977"
+                 })
+            set.Add(code);
+        return set;
+    }
+
+    /// <summary>Код региона (2–3 цифры в конце) или "" если формат не распознан.</summary>
+    public static string RegionOf(string? plate)
+    {
+        var n = Normalize(plate);
+        return LooksLikeRuPlate(n) && n.Length >= 8 ? n[6..] : "";
+    }
+
+    public static bool IsValidRegion(string? plate)
+    {
+        var region = RegionOf(plate);
+        return region.Length > 0 && ValidRegions.Contains(region);
+    }
+
+    /// <summary>Формат РФ И существующий код региона — условие записи в БД.</summary>
+    public static bool LooksLikeRuPlateWithRegion(string? plate) =>
+        LooksLikeRuPlate(plate) && IsValidRegion(plate);
+
+    /// <summary>
     /// OCR иногда клеит лишнюю букву перед военным номером: Е9036СС45 → 9036СС45.
     /// </summary>
     public static string? TryFixMilitaryWithLeadingLetter(string? plate)
@@ -96,9 +138,26 @@ public static class PlateAlphabet
     }
 
     /// <summary>
+    /// Похожие по виду глифы: на инвертированном кадре первая цифра военного номера
+    /// читается как буква. Пары взяты по форме символа, а не по частоте в выборке.
+    /// </summary>
+    private static readonly Dictionary<char, char> LetterToDigitLookalike = new()
+    {
+        ['О'] = '0',
+        ['В'] = '8',
+        ['Е'] = '6',
+        ['Т'] = '7',
+        ['А'] = '4',
+        ['С'] = '5',
+        ['У'] = '9',
+        ['Р'] = '9',
+    };
+
+    /// <summary>
     /// На инвертированном кадре военный 9036СС45 часто читается как гражданский У036СС45
-    /// (потеряна первая цифра, вместо неё буква). Пробуем подставить цифру 0–9.
-    /// Вызывать только для invert-прохода — иначе ломает обычные А123ВС45.
+    /// (первая цифра принята за похожую букву). Возвращаем подмену только если
+    /// глиф действительно похож: угадывать цифру наобум нельзя — это молча
+    /// портит данные, а верный вариант всё равно придёт голосованием по кадрам.
     /// </summary>
     public static string? TryFixMilitaryFromCivilianLookalike(string? plate)
     {
@@ -110,19 +169,11 @@ public static class PlateAlphabet
         if (pair is not ("СС" or "ВВ" or "КК" or "ММ" or "ТТ" or "НН" or "ЕЕ" or "АА"))
             return null;
 
-        var rest = n[1..]; // 036СС45
-        string? best = null;
-        foreach (var d in "0123456789")
-        {
-            var cand = d + rest;
-            if (LooksLikeMilitaryRuPlate(cand))
-                best = cand; // последняя подходящая; ниже предпочтём '9' если есть
-        }
-        // часто первая цифра военных — 0–9; если есть вариант с 9 (как 9036…) — он приоритетнее
-        var with9 = '9' + rest;
-        if (LooksLikeMilitaryRuPlate(with9))
-            return with9;
-        return best;
+        if (!LetterToDigitLookalike.TryGetValue(n[0], out var digit))
+            return null;
+
+        var candidate = digit + n[1..];
+        return LooksLikeMilitaryRuPlate(candidate) ? candidate : null;
     }
 
     /// <summary>Ключ дедупа: гражданский — первые 6 символов (А123ВС), военный — 4 цифры + 2 буквы.</summary>

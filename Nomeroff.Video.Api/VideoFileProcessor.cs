@@ -2,13 +2,32 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
 using System.Text.Json;
+using System.Threading.Channels;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Nomeroff.Shared;
 
 namespace Nomeroff.Video.Api;
 
-/// <summary>Общая обработка локального видеофайла: ffmpeg (чанки) → OCR → NDJSON-события.</summary>
+/// <summary>Настройки одного прогона видео.</summary>
+public sealed class VideoProcessOptions
+{
+    /// <summary>Кадров в секунду на распознавание. Голосованию нужно &gt;= 2.</summary>
+    public double SampleFps { get; set; } = 3.0;
+
+    /// <summary>Устаревший вход из UI: 1/intervalSec. Задаёт SampleFps, если он не указан.</summary>
+    public static VideoProcessOptions FromIntervalSec(int intervalSec) =>
+        new() { SampleFps = intervalSec > 0 ? 1.0 / intervalSec : 1.0 };
+}
+
+/// <summary>
+/// Обработка локального видеофайла: ffmpeg (raw-пайп) → батчевый OCR → NDJSON-события.
+///
+/// Ключевые отличия от прежней схемы: кадры не уезжают на диск JPEG-ами и не
+/// читаются обратно, на кадр приходится один HTTP-вызов вместо шести (варианты
+/// предобработки делает Python), а декодирование и распознавание идут
+/// одновременно через Channel, чтобы GPU не ждал, пока C# готовит следующий батч.
+/// </summary>
 public sealed class VideoFileProcessor
 {
     private readonly IHttpClientFactory _httpFactory;
@@ -28,299 +47,507 @@ public sealed class VideoFileProcessor
         _logger = logger;
     }
 
-    public async Task ProcessAsync(
+    /// <summary>Совместимость с прежним вызовом по intervalSec.</summary>
+    public Task ProcessAsync(
         string videoPath,
         int intervalSec,
         Func<object, CancellationToken, Task> emit,
         CancellationToken ct,
-        bool deleteTempDirOnExit = true)
-    {
-        intervalSec = Math.Clamp(intervalSec, 1, 60);
-        var chunkSize = Math.Clamp(_config.GetValue("MaxVideoFrames", 300), 1, 10_000);
-        var minConfidence = Math.Clamp(_config.GetValue("PlateMinConfidence", 0.60), 0.0, 1.0);
-        var tempDir = Path.Combine(Path.GetTempPath(), "nomeroff_video_" + Guid.NewGuid().ToString("N"));
+        bool deleteTempDirOnExit = true) =>
+        ProcessAsync(videoPath, VideoProcessOptions.FromIntervalSec(intervalSec), emit, ct);
 
-        try
-        {
-            Directory.CreateDirectory(tempDir);
-
-            if (!File.Exists(videoPath))
-                throw new FileNotFoundException("Видеофайл не найден", videoPath);
-
-            await emit(new { type = "progress", stage = "save", message = "Подготовка файла...", percent = 2 }, ct);
-
-            var ffmpegPath = ResolveFfmpegPath();
-            var durationSec = await TryProbeDurationSecAsync(ffmpegPath, videoPath, ct);
-            var estimatedFrames = durationSec.HasValue
-                ? Math.Max(1, (int)Math.Ceiling(durationSec.Value / intervalSec))
-                : (int?)null;
-
-            await emit(new
-            {
-                type = "progress",
-                stage = "ffmpeg",
-                message = estimatedFrames.HasValue
-                    ? $"Длинный ролик: ~{estimatedFrames} кадров, чанки по {chunkSize}..."
-                    : $"Обработка чанками по {chunkSize} кадров...",
-                percent = 5
-            }, ct);
-
-            var http = _httpFactory.CreateClient("Nomeroff");
-            var results = new List<VideoFrameEmit>();
-            var plateCropRatio = Math.Clamp(_config.GetValue("GpsOcr:PlateCropBottomRatio", 0.12), 0, 0.45);
-            var useRoiFallback = _config.GetValue("GpsOcr:PlateRoiFallback", true);
-            // ROI/агрессивный crop чаще дают мусор — выше порог
-            var roiMinConfidence = Math.Clamp(
-                _config.GetValue("PlateRoiMinConfidence", Math.Max(minConfidence, 0.72)),
-                0.0, 1.0);
-            var gpsOkCount = 0;
-            var globalFrameIndex = 0;
-            var chunkIndex = 0;
-
-            while (true)
-            {
-                ct.ThrowIfCancellationRequested();
-                var chunkStartSec = chunkIndex * chunkSize * intervalSec;
-                if (durationSec.HasValue && chunkStartSec >= durationSec.Value - 0.05)
-                    break;
-
-                var chunkDir = Path.Combine(tempDir, $"chunk_{chunkIndex:D4}");
-                Directory.CreateDirectory(chunkDir);
-                var framePattern = Path.Combine(chunkDir, "frame_%04d.jpg");
-                var chunkDurationSec = chunkSize * intervalSec;
-
-                var extracted = await ExtractChunkAsync(
-                    ffmpegPath, videoPath, chunkStartSec, chunkDurationSec, intervalSec, framePattern, emit, ct);
-                if (!extracted)
-                    return;
-
-                var frameFiles = Directory.GetFiles(chunkDir, "frame_*.jpg").OrderBy(f => f).ToList();
-                if (frameFiles.Count == 0)
-                {
-                    try { Directory.Delete(chunkDir, true); } catch { /* ignore */ }
-                    break;
-                }
-
-                _logger.LogInformation(
-                    "process-video: chunk {Chunk} start={Start}s frames={Count} (chunkSize={ChunkSize})",
-                    chunkIndex, chunkStartSec, frameFiles.Count, chunkSize);
-
-                foreach (var framePath in frameFiles)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    var bytes = await File.ReadAllBytesAsync(framePath, ct);
-                    // Кадр для БД/UI: по умолчанию без даунскейла с 1920 и JPEG ~90 (читаемый номер).
-                    // Раньше было 1280@72 — на глаз номер почти не читался.
-                    var storeMaxWidth = _config.GetValue("StorageImage:MaxWidth", 1920);
-                    var storeJpegQuality = _config.GetValue("StorageImage:JpegQuality", 90);
-                    var bytesForStore = FrameStoragePrep.CompressJpeg(bytes, maxWidth: storeMaxWidth, jpegQuality: storeJpegQuality);
-                    var base64Full = Convert.ToBase64String(bytesForStore);
-
-                    double? latitude = null;
-                    double? longitude = null;
-                    string? overlayTimeUtc = null;
-                    if (_gpsOcr.IsAvailable)
-                    {
-                        var overlay = await _gpsOcr.TryExtractFromFileAsync(framePath, ct);
-                        latitude = overlay.Latitude;
-                        longitude = overlay.Longitude;
-                        if (overlay.OverlayTime is { } local)
-                        {
-                            var utc = DateTime.SpecifyKind(local, DateTimeKind.Local).ToUniversalTime();
-                            overlayTimeUtc = utc.ToString("O");
-                        }
-                        if (latitude.HasValue && longitude.HasValue)
-                            gpsOkCount++;
-                    }
-                    else if (globalFrameIndex == 0)
-                    {
-                        _logger.LogWarning("process-video: GpsOcr выключен (GpsOcr:Enabled=false) — координаты из OSD не читаются");
-                    }
-
-                    // plate -> best confidence + crop как атомарная пара одной детекции.
-                    // Никогда не подмешиваем кроп от другого чтения (даже с тем же текстом
-                    // с другого прохода) — иначе в БД текст одного номера и картинка другого.
-                    var plateBest = new Dictionary<string, (double Conf, string? Crop)>(StringComparer.Ordinal);
-                    void Accept(IEnumerable<(string Plate, double Confidence, string? Crop)> found)
-                    {
-                        foreach (var (plate, conf, crop) in found)
-                        {
-                            if (!plateBest.TryGetValue(plate, out var prev) || conf > prev.Conf)
-                                plateBest[plate] = (conf, crop);
-                        }
-                    }
-
-                    var ocrBytes = plateCropRatio > 0.001
-                        ? PlateFramePrep.CropBottom(bytes, plateCropRatio)
-                        : bytes;
-                    Accept(await RecognizePlatesAsync(http, ocrBytes, minConfidence, ct));
-                    Accept(await RecognizePlatesAsync(http, bytes, minConfidence, ct));
-
-                    if (useRoiFallback)
-                    {
-                        var roiBytes = PlateFramePrep.RoadRoiUpscaled(bytes, bottomCropRatio: Math.Max(plateCropRatio, 0.12));
-                        Accept(await RecognizePlatesAsync(http, roiBytes, roiMinConfidence, ct));
-                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.ContrastBoost(roiBytes), roiMinConfidence, ct));
-                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.Invert(roiBytes), minConfidence, ct, militaryLookalikeFix: true));
-                    }
-
-                    if (plateBest.Count == 0 && plateCropRatio < 0.18)
-                    {
-                        Accept(await RecognizePlatesAsync(http, PlateFramePrep.CropBottom(bytes, 0.18), minConfidence, ct));
-                    }
-
-                    var plates = PlateAlphabet.CollapseNearDuplicates(plateBest, maxDistance: 1)
-                        .Select(p => new VideoPlateEmit
-                        {
-                            Plate = p.Plate,
-                            Confidence = p.Confidence,
-                            PlateImageBase64 = p.PlateImageBase64
-                        })
-                        .ToList();
-                    var timeSec = globalFrameIndex * intervalSec;
-                    results.Add(new VideoFrameEmit
-                    {
-                        TimeSec = timeSec,
-                        Plates = plates,
-                        ImageBase64 = base64Full,
-                        Latitude = latitude,
-                        Longitude = longitude,
-                        OverlayTimeUtc = overlayTimeUtc
-                    });
-                    globalFrameIndex++;
-
-                    var totalForPct = estimatedFrames ?? Math.Max(globalFrameIndex, 1);
-                    var pct = 10 + (int)(90.0 * Math.Min(globalFrameIndex, totalForPct) / totalForPct);
-                    await emit(new
-                    {
-                        type = "progress",
-                        stage = "ocr",
-                        message = estimatedFrames.HasValue
-                            ? $"Распознавание: {globalFrameIndex} / ~{estimatedFrames} (чанк {chunkIndex + 1})"
-                            : $"Распознавание: {globalFrameIndex} (чанк {chunkIndex + 1})"
-                              + (plates.Count > 0 ? $" · найдено {plates.Count}" : ""),
-                        current = globalFrameIndex,
-                        total = estimatedFrames ?? globalFrameIndex,
-                        percent = Math.Clamp(pct, 10, 99)
-                    }, ct);
-                }
-
-                try { Directory.Delete(chunkDir, true); } catch { /* ignore */ }
-
-                if (frameFiles.Count < chunkSize)
-                    break;
-
-                chunkIndex++;
-            }
-
-            if (_gpsOcr.IsAvailable)
-                _logger.LogInformation("process-video: GPS OCR {GpsOk}/{Total}", gpsOkCount, results.Count);
-            else
-                _logger.LogWarning("process-video: GpsOcr выключен — в БД не будет координат из OSD");
-
-            if (results.Count == 0)
-            {
-                await emit(new VideoProcessEmitResult
-                {
-                    TotalFrames = 0,
-                    IntervalSec = intervalSec,
-                    Results = new List<VideoFrameEmit>(),
-                    GpsOkCount = 0
-                }, ct);
-                return;
-            }
-
-            await emit(new { type = "progress", stage = "done", message = "Готово, отправка результата...", current = results.Count, total = results.Count, percent = 100 }, ct);
-            // Типизированный результат — без Serialize→Deserialize анонимов (координаты не теряются)
-            await emit(new VideoProcessEmitResult
-            {
-                TotalFrames = results.Count,
-                IntervalSec = intervalSec,
-                Results = results,
-                GpsOkCount = gpsOkCount
-            }, ct);
-        }
-        finally
-        {
-            if (deleteTempDirOnExit)
-            {
-                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); } catch { /* ignore */ }
-            }
-        }
-    }
-
-    private async Task<bool> ExtractChunkAsync(
-        string ffmpegPath,
+    public async Task ProcessAsync(
         string videoPath,
-        double startSec,
-        double durationSec,
-        int intervalSec,
-        string framePattern,
+        VideoProcessOptions options,
         Func<object, CancellationToken, Task> emit,
         CancellationToken ct)
     {
-        var psi = new ProcessStartInfo
-        {
-            FileName = ffmpegPath,
-            RedirectStandardError = true,
-            RedirectStandardOutput = true,
-            CreateNoWindow = true
-        };
-        // -ss before -i: fast seek; -t limits chunk length
-        psi.ArgumentList.Add("-y");
-        psi.ArgumentList.Add("-ss");
-        psi.ArgumentList.Add(startSec.ToString("0.###", CultureInfo.InvariantCulture));
-        psi.ArgumentList.Add("-t");
-        psi.ArgumentList.Add(durationSec.ToString("0.###", CultureInfo.InvariantCulture));
-        psi.ArgumentList.Add("-i");
-        psi.ArgumentList.Add(videoPath);
-        psi.ArgumentList.Add("-vf");
-        psi.ArgumentList.Add($"fps=1/{intervalSec},scale=1920:-2");
-        psi.ArgumentList.Add("-q:v");
-        psi.ArgumentList.Add("2");
-        psi.ArgumentList.Add(framePattern);
+        var sampleFps = Math.Clamp(
+            options.SampleFps > 0 ? options.SampleFps : _config.GetValue("SampleFps", 3.0),
+            0.05, 30.0);
+        var batchSize = Math.Clamp(_config.GetValue("PlateBatchSize", 8), 1, 64);
+        var minOcrConfidence = Math.Clamp(_config.GetValue("PlateOcrMinConfidence", 0.55), 0.0, 1.0);
+        var minDetConfidence = Math.Clamp(_config.GetValue("PlateMinConfidence", 0.60), 0.0, 1.0);
+        var osdEveryNth = Math.Max(1, _config.GetValue("GpsOcr:EveryNthFrame", 5));
+        var osdDateTimeSamples = Math.Max(0, _config.GetValue("GpsOcr:DateTimeSamples", 3));
+        var storeMaxWidth = _config.GetValue("StorageImage:MaxWidth", 1920);
+        var storeJpegQuality = _config.GetValue("StorageImage:JpegQuality", 90);
 
-        using var proc = Process.Start(psi);
-        if (proc == null)
+        if (!File.Exists(videoPath))
+            throw new FileNotFoundException("Видеофайл не найден", videoPath);
+
+        await emit(new { type = "progress", stage = "save", message = "Подготовка файла...", percent = 2 }, ct);
+
+        var ffmpegPath = ResolveFfmpegPath();
+        var ffprobePath = ResolveFfprobePath(ffmpegPath);
+        var durationSec = await TryProbeDurationSecAsync(ffprobePath, videoPath, ct);
+        var (startUtc, startSource) = await VideoTimestamps.ResolveStartUtcAsync(videoPath, ffprobePath, ct);
+        _logger.LogInformation(
+            "process-video: {File} fps={Fps} batch={Batch} start={Start:O} (источник {Source})",
+            Path.GetFileName(videoPath), sampleFps, batchSize, startUtc, startSource);
+
+        var estimatedFrames = durationSec.HasValue
+            ? Math.Max(1, (int)Math.Ceiling(durationSec.Value * sampleFps))
+            : (int?)null;
+
+        await emit(new
         {
-            await emit(new { type = "error", message = "Не удалось запустить ffmpeg. Проверьте путь к ffmpeg" }, ct);
-            return false;
+            type = "progress",
+            stage = "ffmpeg",
+            message = estimatedFrames.HasValue
+                ? $"~{estimatedFrames} кадров при {sampleFps:0.##} fps, батчи по {batchSize}..."
+                : $"Обработка батчами по {batchSize} кадров...",
+            percent = 5
+        }, ct);
+
+        // Декодирование в одном потоке, распознавание в другом: пока GPU считает
+        // батч, ffmpeg уже отдаёт следующие кадры.
+        var channel = Channel.CreateBounded<RawFrame>(new BoundedChannelOptions(batchSize * 3)
+        {
+            SingleReader = true,
+            SingleWriter = true,
+            FullMode = BoundedChannelFullMode.Wait
+        });
+
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var producer = Task.Run(
+            () => PumpFramesAsync(ffmpegPath, videoPath, sampleFps, channel.Writer, linked.Token),
+            linked.Token);
+
+        var http = _httpFactory.CreateClient("Nomeroff");
+        var results = new List<VideoFrameEmit>();
+        var gpsOkCount = 0;
+        var frameIndex = 0;
+        double? lastLat = null;
+        double? lastLon = null;
+        // Первое распознанное OSD-время: если начало записи взято из даты файла
+        // (то есть из момента копирования), пересчитываем всё от этой точки.
+        (DateTime Local, double TimeSec)? osdAnchor = null;
+        var dateTimeReads = 0;
+
+        try
+        {
+            var batch = new List<RawFrame>(batchSize);
+            await foreach (var raw in channel.Reader.ReadAllAsync(ct))
+            {
+                batch.Add(raw);
+                if (batch.Count < batchSize)
+                    continue;
+
+                await FlushBatchAsync(batch);
+                batch.Clear();
+            }
+            if (batch.Count > 0)
+                await FlushBatchAsync(batch);
+
+            await producer;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            linked.Cancel();
+            _logger.LogError(ex, "process-video: обработка прервана");
+            await emit(new { type = "error", message = ex.Message }, ct);
+            return;
         }
 
-        var stderr = await proc.StandardError.ReadToEndAsync(ct);
-        await proc.WaitForExitAsync(ct);
-        if (proc.ExitCode != 0)
+        if (_gpsOcr.IsAvailable)
+            _logger.LogInformation("process-video: GPS OCR {GpsOk}/{Total}", gpsOkCount, results.Count);
+        else
+            _logger.LogWarning("process-video: GpsOcr выключен — в БД не будет координат из OSD");
+
+        if (VideoTimestamps.IsWeak(startSource) && osdAnchor is { } anchor)
         {
-            // Пустой хвост ролика иногда даёт ненулевой код при 0 кадров — не считаем фатальным
-            var framesDir = Path.GetDirectoryName(framePattern);
-            var any = framesDir != null && Directory.Exists(framesDir)
-                && Directory.GetFiles(framesDir, "frame_*.jpg").Length > 0;
-            if (!any)
+            var osdStartUtc = DateTime.SpecifyKind(anchor.Local, DateTimeKind.Local)
+                .ToUniversalTime()
+                .AddSeconds(-anchor.TimeSec);
+            _logger.LogInformation(
+                "process-video: начало записи переопределено по OSD: {Old:O} -> {New:O}",
+                startUtc, osdStartUtc);
+            startUtc = osdStartUtc;
+            foreach (var fr in results)
+                fr.OverlayTimeUtc = startUtc.AddSeconds(fr.TimeSec).ToString("O");
+        }
+
+        await emit(new
+        {
+            type = "progress", stage = "done", message = "Готово, отправка результата...",
+            current = results.Count, total = results.Count, percent = 100
+        }, ct);
+
+        await emit(new VideoProcessEmitResult
+        {
+            TotalFrames = results.Count,
+            IntervalSec = (int)Math.Max(1, Math.Round(1.0 / sampleFps)),
+            SampleFps = sampleFps,
+            Results = results,
+            GpsOkCount = gpsOkCount
+        }, ct);
+        return;
+
+        async Task FlushBatchAsync(List<RawFrame> frames)
+        {
+            var osd = new Dictionary<int, OverlayOcrResult>();
+            foreach (var f in frames)
             {
-                _logger.LogDebug("process-video: ffmpeg chunk exit {Code} at {Start}s (no frames). {Stderr}",
-                    proc.ExitCode, startSec, Truncate(stderr, 400));
-                return true; // caller sees 0 frames and stops
+                if (!_gpsOcr.IsAvailable || f.Index % osdEveryNth != 0)
+                    continue;
+                // Дату читаем только пока не набрали проверочных отсчётов: время
+                // кадра всё равно считается от начала записи, а лишняя полоса —
+                // это ~1.5 с CPU на каждый OSD-кадр.
+                var needDate = dateTimeReads < osdDateTimeSamples;
+                if (needDate)
+                    dateTimeReads++;
+                osd[f.Index] = await _gpsOcr.TryExtractFromBytesAsync(
+                    f.Jpeg, $"t={f.TimeSec:0.##}s", needDate, ct);
             }
 
-            _logger.LogError("process-video: ffmpeg exit {Code}. {Stderr}", proc.ExitCode, Truncate(stderr, 800));
-            await emit(new { type = "error", message = "ffmpeg завершился с ошибкой. Проверьте формат видео." }, ct);
-            return false;
-        }
+            var recognized = await RecognizeBatchAsync(
+                http, frames, minOcrConfidence, minDetConfidence, ct);
 
-        return true;
+            for (var i = 0; i < frames.Count; i++)
+            {
+                var f = frames[i];
+                if (osd.TryGetValue(f.Index, out var overlay))
+                {
+                    if (overlay.Latitude.HasValue) lastLat = overlay.Latitude;
+                    if (overlay.Longitude.HasValue) lastLon = overlay.Longitude;
+                    if (overlay.Latitude.HasValue && overlay.Longitude.HasValue)
+                        gpsOkCount++;
+                }
+
+                var expectedUtc = startUtc.AddSeconds(f.TimeSec);
+                var overlayTime = osd.TryGetValue(f.Index, out var o) ? o.OverlayTime : null;
+                if (overlayTime.HasValue)
+                {
+                    osdAnchor ??= (overlayTime.Value, f.TimeSec);
+                    if (!VideoTimestamps.OverlayAgreesWithExpected(overlayTime, expectedUtc))
+                    {
+                        _logger.LogWarning(
+                            "OSD время {Osd:yyyy-MM-dd HH:mm:ss} расходится с расчётным {Expected:O}",
+                            overlayTime.Value, expectedUtc);
+                    }
+                }
+
+                results.Add(new VideoFrameEmit
+                {
+                    TimeSec = f.TimeSec,
+                    Plates = i < recognized.Count ? recognized[i] : new List<VideoPlateEmit>(),
+                    ImageBase64 = Convert.ToBase64String(
+                        FrameStoragePrep.CompressJpeg(f.Jpeg, storeMaxWidth, storeJpegQuality)),
+                    Latitude = lastLat,
+                    Longitude = lastLon,
+                    OverlayTimeUtc = expectedUtc.ToString("O")
+                });
+                frameIndex++;
+            }
+
+            var totalForPct = estimatedFrames ?? Math.Max(frameIndex, 1);
+            var pct = 10 + (int)(90.0 * Math.Min(frameIndex, totalForPct) / totalForPct);
+            var found = recognized.Sum(p => p.Count);
+            await emit(new
+            {
+                type = "progress",
+                stage = "ocr",
+                message = estimatedFrames.HasValue
+                    ? $"Распознавание: {frameIndex} / ~{estimatedFrames}"
+                      + (found > 0 ? $" · найдено {found}" : "")
+                    : $"Распознавание: {frameIndex}",
+                current = frameIndex,
+                total = estimatedFrames ?? frameIndex,
+                percent = Math.Clamp(pct, 10, 99)
+            }, ct);
+        }
     }
 
-    private static async Task<double?> TryProbeDurationSecAsync(string ffmpegPath, string videoPath, CancellationToken ct)
+    private sealed record RawFrame(int Index, double TimeSec, byte[] Jpeg);
+
+    /// <summary>
+    /// Один процесс ffmpeg на весь ролик: MJPEG в stdout вместо чанков файлов на диск.
+    /// -hwaccel cuda снимает декодирование H.264 с CPU; при отсутствии CUDA-декодера
+    /// ffmpeg сам откатывается на программный путь.
+    /// </summary>
+    private async Task PumpFramesAsync(
+        string ffmpegPath,
+        string videoPath,
+        double sampleFps,
+        ChannelWriter<RawFrame> writer,
+        CancellationToken ct)
+    {
+        Exception? failure = null;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            psi.ArgumentList.Add("-nostdin");
+            psi.ArgumentList.Add("-hide_banner");
+            psi.ArgumentList.Add("-loglevel");
+            psi.ArgumentList.Add("error");
+            if (_config.GetValue("FfmpegHwAccel", true))
+            {
+                // авто-детект: если CUDA-декодера нет, ffmpeg молча идёт софтом
+                psi.ArgumentList.Add("-hwaccel");
+                psi.ArgumentList.Add("auto");
+            }
+            psi.ArgumentList.Add("-i");
+            psi.ArgumentList.Add(videoPath);
+            // Без scale=1920:-2: источник уже 1920x1080, фильтр был no-op'ом,
+            // но заставлял ffmpeg гонять кадры через swscale.
+            psi.ArgumentList.Add("-vf");
+            psi.ArgumentList.Add($"fps={sampleFps.ToString("0.####", CultureInfo.InvariantCulture)}");
+            psi.ArgumentList.Add("-q:v");
+            psi.ArgumentList.Add("2");
+            psi.ArgumentList.Add("-f");
+            psi.ArgumentList.Add("image2pipe");
+            psi.ArgumentList.Add("-vcodec");
+            psi.ArgumentList.Add("mjpeg");
+            psi.ArgumentList.Add("pipe:1");
+
+            using var proc = Process.Start(psi)
+                             ?? throw new InvalidOperationException(
+                                 "Не удалось запустить ffmpeg. Проверьте путь к ffmpeg");
+
+            var stderrTask = proc.StandardError.ReadToEndAsync(ct);
+            var index = 0;
+            await foreach (var jpeg in ReadMjpegStreamAsync(proc.StandardOutput.BaseStream, ct))
+            {
+                await writer.WriteAsync(new RawFrame(index, index / sampleFps, jpeg), ct);
+                index++;
+            }
+
+            await proc.WaitForExitAsync(ct);
+            var stderr = await stderrTask;
+            if (proc.ExitCode != 0 && index == 0)
+            {
+                _logger.LogError("process-video: ffmpeg exit {Code}. {Stderr}",
+                    proc.ExitCode, Truncate(stderr, 800));
+                failure = new InvalidOperationException(
+                    "ffmpeg завершился с ошибкой. Проверьте формат видео.");
+            }
+            else if (!string.IsNullOrWhiteSpace(stderr))
+            {
+                _logger.LogDebug("process-video: ffmpeg stderr {Stderr}", Truncate(stderr, 400));
+            }
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+        finally
+        {
+            writer.TryComplete(failure);
+        }
+    }
+
+    /// <summary>
+    /// Разбор потока последовательных JPEG из image2pipe.
+    ///
+    /// В выводе ffmpeg -vcodec mjpeg нет ни EXIF-миниатюр, ни вложенных
+    /// изображений, поэтому границы кадров однозначно задаются маркерами
+    /// SOI (FF D8) и EOI (FF D9).
+    /// </summary>
+    internal static async IAsyncEnumerable<byte[]> ReadMjpegStreamAsync(
+        Stream stream,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        var buffer = new byte[1 << 16];
+        var frame = new MemoryStream(1 << 20);
+        var inFrame = false;
+        var prevWasFf = false;
+
+        while (true)
+        {
+            var read = await stream.ReadAsync(buffer, ct);
+            if (read <= 0)
+                break;
+
+            for (var i = 0; i < read; i++)
+            {
+                var b = buffer[i];
+                if (!inFrame)
+                {
+                    if (prevWasFf && b == 0xD8)
+                    {
+                        inFrame = true;
+                        frame.SetLength(0);
+                        frame.WriteByte(0xFF);
+                        frame.WriteByte(0xD8);
+                    }
+                    prevWasFf = b == 0xFF;
+                    continue;
+                }
+
+                frame.WriteByte(b);
+                if (prevWasFf && b == 0xD9)
+                {
+                    inFrame = false;
+                    prevWasFf = false;
+                    yield return frame.ToArray();
+                    continue;
+                }
+                prevWasFf = b == 0xFF;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Один HTTP-вызов на батч кадров: варианты предобработки (crop/ROI/контраст/
+    /// инверсия) делает Python, поэтому 6 round-trip на кадр превращаются в 1 на батч.
+    /// </summary>
+    private async Task<List<List<VideoPlateEmit>>> RecognizeBatchAsync(
+        HttpClient http,
+        List<RawFrame> frames,
+        double minOcrConfidence,
+        double minDetConfidence,
+        CancellationToken ct)
+    {
+        var empty = frames.Select(_ => new List<VideoPlateEmit>()).ToList();
+        var variants = (_config["PlateVariants"] ?? "full,crop,roi,roi_contrast")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        var body = new
+        {
+            frames = frames.Select(f => new
+            {
+                image_base64 = Convert.ToBase64String(f.Jpeg),
+                time_sec = f.TimeSec
+            }).ToArray(),
+            variants,
+            min_ocr_confidence = minOcrConfidence,
+            include_crop = true,
+            // Консенсус считаем в C# по всему ролику, а не по одному батчу:
+            // машина может попасть на границу двух батчей.
+            min_frame_hits = 1
+        };
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await http.PostAsJsonAsync("api/process_frames", body, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "process_frames недоступен");
+            return empty;
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogWarning("process_frames HTTP {Status}", response.StatusCode);
+            return empty;
+        }
+
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: ct);
+        if (!json.TryGetProperty("frames", out var framesEl) || framesEl.ValueKind != JsonValueKind.Array)
+            return empty;
+
+        var result = new List<List<VideoPlateEmit>>(frames.Count);
+        foreach (var frameEl in framesEl.EnumerateArray())
+        {
+            var plates = new List<VideoPlateEmit>();
+            if (frameEl.TryGetProperty("plates", out var platesEl)
+                && platesEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var p in platesEl.EnumerateArray())
+                {
+                    var emit = ReadPlate(p, minOcrConfidence, minDetConfidence);
+                    if (emit != null)
+                        plates.Add(emit);
+                }
+            }
+            result.Add(plates);
+        }
+        while (result.Count < frames.Count)
+            result.Add(new List<VideoPlateEmit>());
+        return result;
+    }
+
+    private static VideoPlateEmit? ReadPlate(JsonElement item, double minOcrConfidence, double minDetConfidence)
+    {
+        if (!item.TryGetProperty("plate", out var plateEl))
+            return null;
+
+        var plate = PlateAlphabet.Normalize(plateEl.GetString());
+        if (string.IsNullOrWhiteSpace(plate) || !PlateAlphabet.LooksLikeRuPlateWithRegion(plate))
+            return null;
+
+        var ocrConf = GetDouble(item, "ocr_confidence");
+        var detConf = GetDouble(item, "det_confidence", GetDouble(item, "confidence"));
+        // Фильтруем по уверенности OCR: score детектора говорит лишь о том,
+        // что в кадре есть номерная пластина, а не что текст прочитан верно.
+        if (ocrConf < minOcrConfidence || detConf < minDetConfidence)
+            return null;
+
+        var bbox = ReadBbox(item);
+        return new VideoPlateEmit
+        {
+            Plate = plate,
+            Confidence = detConf,
+            OcrConfidence = ocrConf,
+            CharProbs = ReadCharProbs(item),
+            Bbox = bbox,
+            BboxArea = item.TryGetProperty("bbox_area", out var areaEl) && areaEl.ValueKind == JsonValueKind.Number
+                ? areaEl.GetInt32()
+                : BboxArea(bbox),
+            PlateImageBase64 =
+                item.TryGetProperty("plate_image_base64", out var cropEl) && cropEl.ValueKind == JsonValueKind.String
+                    ? cropEl.GetString()
+                    : null
+        };
+    }
+
+    private static double[]? ReadCharProbs(JsonElement item)
+    {
+        if (!item.TryGetProperty("char_probs", out var el) || el.ValueKind != JsonValueKind.Array)
+            return null;
+        var values = new List<double>();
+        foreach (var v in el.EnumerateArray())
+        {
+            if (v.ValueKind == JsonValueKind.Number)
+                values.Add(v.GetDouble());
+        }
+        return values.Count > 0 ? values.ToArray() : null;
+    }
+
+    private static int[]? ReadBbox(JsonElement item)
+    {
+        if (!item.TryGetProperty("bbox", out var bboxEl) || bboxEl.ValueKind != JsonValueKind.Array)
+            return null;
+        var bbox = new int[4];
+        var i = 0;
+        foreach (var v in bboxEl.EnumerateArray())
+        {
+            if (i >= 4) break;
+            if (v.ValueKind == JsonValueKind.Number)
+                bbox[i++] = v.GetInt32();
+        }
+        return i >= 4 ? bbox : null;
+    }
+
+    private static int BboxArea(int[]? bbox) =>
+        bbox == null ? 0 : Math.Max(0, bbox[2] - bbox[0]) * Math.Max(0, bbox[3] - bbox[1]);
+
+    private static double GetDouble(JsonElement item, string name, double fallback = 0.0) =>
+        item.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.Number
+            ? el.GetDouble()
+            : fallback;
+
+    private static async Task<double?> TryProbeDurationSecAsync(
+        string ffprobePath, string videoPath, CancellationToken ct)
     {
         try
         {
-            var ffprobe = Path.Combine(Path.GetDirectoryName(ffmpegPath) ?? "", "ffprobe.exe");
-            if (!File.Exists(ffprobe))
-                ffprobe = "ffprobe";
-
             var psi = new ProcessStartInfo
             {
-                FileName = ffprobe,
+                FileName = ffprobePath,
                 ArgumentList =
                 {
                     "-v", "error",
@@ -359,84 +586,9 @@ public sealed class VideoFileProcessor
         return ffmpegPath;
     }
 
-    private static async Task<List<(string Plate, double Confidence, string? Crop)>> RecognizePlatesAsync(
-        HttpClient http,
-        byte[] jpegBytes,
-        double minConfidence,
-        CancellationToken ct,
-        bool militaryLookalikeFix = false,
-        bool includeCrop = true)
+    private static string ResolveFfprobePath(string ffmpegPath)
     {
-        var body = new { image_base64 = Convert.ToBase64String(jpegBytes) };
-        var response = await http.PostAsJsonAsync("api/process_frame", body, ct);
-        if (!response.IsSuccessStatusCode)
-            return new List<(string, double, string?)>();
-
-        var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: ct);
-        var plates = new List<(string, double, string?)>();
-        if (json.TryGetProperty("plates", out var arr))
-        {
-            foreach (var item in arr.EnumerateArray())
-            {
-                if (!item.TryGetProperty("plate", out var plate))
-                    continue;
-
-                var conf = 1.0;
-                if (item.TryGetProperty("confidence", out var confEl) && confEl.ValueKind == JsonValueKind.Number)
-                    conf = confEl.GetDouble();
-                if (conf < minConfidence)
-                    continue;
-
-                string? crop = null;
-                if (includeCrop)
-                {
-                    if (item.TryGetProperty("plate_image_base64", out var cropEl) && cropEl.ValueKind == JsonValueKind.String)
-                        crop = cropEl.GetString();
-                    if (string.IsNullOrEmpty(crop) && item.TryGetProperty("bbox", out var bboxEl) && bboxEl.ValueKind == JsonValueKind.Array)
-                    {
-                        var bbox = new int[4];
-                        var i = 0;
-                        foreach (var v in bboxEl.EnumerateArray())
-                        {
-                            if (i >= 4) break;
-                            if (v.ValueKind == JsonValueKind.Number)
-                                bbox[i++] = v.GetInt32();
-                        }
-                        if (i >= 4)
-                        {
-                            var cropBytes = PlateFramePrep.CropByBbox(jpegBytes, bbox);
-                            if (cropBytes != null)
-                                crop = Convert.ToBase64String(cropBytes);
-                        }
-                    }
-                }
-
-                var s = PlateAlphabet.Normalize(plate.GetString());
-                if (string.IsNullOrWhiteSpace(s))
-                    continue;
-
-                // Е9036СС45 → 9036СС45
-                var milLead = PlateAlphabet.TryFixMilitaryWithLeadingLetter(s);
-                if (milLead != null)
-                {
-                    plates.Add((milLead, conf + 0.02, crop)); // слегка предпочесть военный фикс
-                    continue;
-                }
-
-                if (militaryLookalikeFix)
-                {
-                    var milLike = PlateAlphabet.TryFixMilitaryFromCivilianLookalike(s);
-                    if (milLike != null)
-                    {
-                        plates.Add((milLike, conf + 0.02, crop));
-                        continue;
-                    }
-                }
-
-                if (PlateAlphabet.LooksLikeRuPlate(s))
-                    plates.Add((s, conf, crop));
-            }
-        }
-        return plates;
+        var ffprobe = Path.Combine(Path.GetDirectoryName(ffmpegPath) ?? "", "ffprobe.exe");
+        return File.Exists(ffprobe) ? ffprobe : "ffprobe";
     }
 }

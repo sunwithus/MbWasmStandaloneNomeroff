@@ -60,8 +60,19 @@ public class ProcessVideoPlateResult
 {
     [JsonPropertyName("plate")]
     public string Plate { get; set; } = "";
+    /// <summary>Score детектора: в кадре есть номерная пластина.</summary>
     [JsonPropertyName("confidence")]
     public double Confidence { get; set; } = 1.0;
+    /// <summary>Уверенность CTC-головы OCR: текст прочитан верно.</summary>
+    [JsonPropertyName("ocrConfidence")]
+    public double OcrConfidence { get; set; }
+    /// <summary>Вероятности по символам — веса для межкадрового голосования.</summary>
+    [JsonPropertyName("charProbs")]
+    public double[]? CharProbs { get; set; }
+    [JsonPropertyName("bbox")]
+    public int[]? Bbox { get; set; }
+    [JsonPropertyName("bboxArea")]
+    public int BboxArea { get; set; }
     [JsonPropertyName("plateImageBase64")]
     public string? PlateImageBase64 { get; set; }
 }
@@ -88,6 +99,8 @@ public class ProcessVideoResponse
     public int TotalFrames { get; set; }
     [JsonPropertyName("intervalSec")]
     public int IntervalSec { get; set; }
+    [JsonPropertyName("sampleFps")]
+    public double SampleFps { get; set; }
     [JsonPropertyName("results")]
     public List<ProcessVideoFrameResult> Results { get; set; } = new();
 }

@@ -23,6 +23,7 @@ builder.Services.AddScoped(sp => new HttpClient());
 builder.Services.AddScoped<SettingsService>();
 builder.Services.AddScoped<NomeroffService>();
 builder.Services.AddScoped<RecordsService>();
+builder.Services.AddScoped<PlateArbiter>();
 builder.Services.AddScoped<VideoResultProcessor>();
 builder.Services.AddScoped<RecognitionStateService>();
 builder.Services.AddSingleton<FolderDiskQueue>();
@@ -34,7 +35,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<FolderWatchService
 builder.Services.Configure<MbWebApp.Options.NomeroffAppOptions>(o =>
 {
     o.MaxVideoFrames = builder.Configuration.GetValue("MaxVideoFrames", 300);
-    o.PlateMinConfidence = builder.Configuration.GetValue("PlateMinConfidence", 0.70);
+    o.PlateMinConfidence = builder.Configuration.GetValue("PlateMinConfidence", 0.60);
     o.NomeroffApiBaseUrl = builder.Configuration["NomeroffApiBaseUrl"] ?? "http://127.0.0.1:8000";
     o.MaxVideoUploadBytes = builder.Configuration.GetValue("MaxVideoUploadBytes", 1024L * 1024 * 1024);
 });
@@ -95,8 +96,64 @@ app.MapGet("/health", (IConfiguration config) => Results.Ok(new
     modules = new[] { "ui", "gps", "interbase", "video" },
     pythonHint = config["NomeroffApiBaseUrl"] ?? "http://127.0.0.1:8000",
     maxVideoFrames = config.GetValue("MaxVideoFrames", 300),
-    plateMinConfidence = config.GetValue("PlateMinConfidence", 0.70)
+    plateMinConfidence = config.GetValue("PlateMinConfidence", 0.60)
 }));
+
+// Полный конвейер без записи в БД: кадры -> треки -> голосование -> итоговые
+// номера. Нужен регрессионному стенду и разбору жалоб «почему этого номера нет»:
+// сырые чтения из /api/process-video-path показывают работу распознавателя, а
+// сюда попадает уже то, что ушло бы в БД.
+app.MapPost("/api/analyze-video-path", async (
+    AnalyzeVideoRequest body,
+    RecordsService records,
+    VideoResultProcessor processor,
+    IConfiguration config,
+    CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(body.Path))
+        return Results.BadRequest("path не передан");
+
+    var path = Path.GetFullPath(body.Path.Trim());
+    if (!File.Exists(path))
+        return Results.NotFound($"Файл не найден: {path}");
+
+    var sampleFps = body.SampleFps ?? config.GetValue("SampleFps", 3.0);
+    var started = DateTime.UtcNow;
+    var api = await records.ProcessVideoFromPathAsync(path, sampleFps, null, ct);
+    if (api == null)
+        return Results.Problem("Конвейер не вернул результат");
+
+    var outcome = await processor.ProcessAsync(new VideoResultProcessRequest
+    {
+        ApiResponse = api,
+        SaveToDb = false,
+        MinFrameHits = body.MinFrameHits ?? config.GetValue("PlateMinFrameHits", 2),
+        Source = "benchmark"
+    }, ct);
+
+    return Results.Ok(new
+    {
+        elapsedSec = (DateTime.UtcNow - started).TotalSeconds,
+        sampleFps,
+        summary = outcome.Summary,
+        // plates — после голосования (одна запись на трек), results — сырые чтения
+        plates = outcome.Tracks,
+        totalFrames = api.TotalFrames,
+        results = api.Results.Select(fr => new
+        {
+            timeSec = fr.TimeSec,
+            overlayTimeUtc = fr.OverlayTimeUtc,
+            latitude = fr.Latitude,
+            longitude = fr.Longitude,
+            plates = fr.Plates.Select(p => new
+            {
+                plate = p.Plate,
+                confidence = p.Confidence,
+                ocrConfidence = p.OcrConfidence
+            })
+        })
+    });
+}).DisableAntiforgery();
 
 app.MapNomeroffGpsEndpoints("/ops/gps");
 app.MapNomeroffInterbaseEndpoints();
@@ -110,3 +167,11 @@ app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 
 app.Run();
+
+/// <summary>Вход /api/analyze-video-path: путь к ролику и опциональные пороги.</summary>
+public sealed class AnalyzeVideoRequest
+{
+    public string Path { get; set; } = "";
+    public double? SampleFps { get; set; }
+    public int? MinFrameHits { get; set; }
+}

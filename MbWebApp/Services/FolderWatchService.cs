@@ -204,8 +204,18 @@ public sealed class FolderWatchService : BackgroundService
 
         try
         {
-            await _processor.ProcessAsync(path, cfg.IntervalSec, async (payload, token) =>
+            var options = new VideoProcessOptions { SampleFps = ResolveSampleFps(cfg) };
+            await _processor.ProcessAsync(path, options, async (payload, token) =>
             {
+                // Типизированная ветка первой: сериализовать результат целиком,
+                // чтобы прочитать одно поле, — это ещё и склейка всех кадров
+                // в одну строку (~150 МБ на десятиминутном ролике).
+                if (payload is VideoProcessEmitResult typed)
+                {
+                    apiResponse = VideoEmitMapper.ToResponse(typed);
+                    return;
+                }
+
                 var json = JsonSerializer.Serialize(payload);
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
@@ -225,6 +235,7 @@ public sealed class FolderWatchService : BackgroundService
                 }
                 else if (type == "result")
                 {
+                    // Совместимость со старым NDJSON { type: "result", ... }
                     apiResponse = JsonSerializer.Deserialize<ProcessVideoResponse>(json, JsonOpts);
                 }
 
@@ -253,6 +264,7 @@ public sealed class FolderWatchService : BackgroundService
                 Watchlist = cfg.Watchlist,
                 DeviceName = cfg.DeviceName,
                 Source = "folder_watch",
+                MinFrameHits = _config.GetValue("PlateMinFrameHits", 2),
                 Progress = new Progress<(int current, int total, string message)>(p =>
                     _state.ReportProgress(p.message, (int)(100.0 * p.current / Math.Max(p.total, 1)), p.current, p.total))
             }, ct);
@@ -277,6 +289,19 @@ public sealed class FolderWatchService : BackgroundService
             _logger.LogError(ex, "FolderWatch process failed: {Path}", path);
             await FailOrParkAsync(path, cfg, fromDiskQueue, ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Плотность выборки для режима папки. IntervalSec = 2 означало 0.5 кадра
+    /// в секунду — один кадр из 60, при котором голосованию нечего сравнивать.
+    /// </summary>
+    private double ResolveSampleFps(FolderWatchConfig cfg)
+    {
+        if (cfg.SampleFps > 0)
+            return Math.Clamp(cfg.SampleFps, 0.05, 30.0);
+        if (cfg.IntervalSec > 0)
+            return 1.0 / cfg.IntervalSec;
+        return _config.GetValue("SampleFps", 3.0);
     }
 
     private Task FailOrParkAsync(string path, FolderWatchConfig cfg, FolderDiskQueueJob? fromDiskQueue, string error)

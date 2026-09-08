@@ -37,4 +37,11 @@ public sealed class GpsOcrOptions
     /// Если после обрезки номера не найдены — повторить OCR на увеличенной зоне дороги.
     /// </summary>
     public bool PlateRoiFallback { get; set; } = true;
+
+    /// <summary>
+    /// Читать OSD раз в N кадров. GPS меняется медленно, а время выводится из
+    /// имени файла, поэтому два CPU-вызова RapidOCR на каждый кадр — чистые потери.
+    /// Между опорными кадрами координаты интерполируются.
+    /// </summary>
+    public int EveryNthFrame { get; set; } = 5;
 }

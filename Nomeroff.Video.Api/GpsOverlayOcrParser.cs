@@ -31,32 +31,75 @@ public static class GpsOverlayOcrParser
         @"(?<![.\d])(\d{3})\s*,\s*N\s*(\d{1,2})(?:[.,](\d{1,4}))?",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
+    /// <summary>
+    /// OSD регистратора: 07-07-2026 14:51:41 (ДД-ММ-ГГГГ). Принимаем и ГГГГ-ММ-ДД —
+    /// порядок различаем по группе со значением &gt; 31. Разделитель между датой и
+    /// временем — \s*, а не \s+: CollapseDigits удаляет пробел между «2026» и «14».
+    /// </summary>
     private static readonly Regex DateTimeOverlay = new(
-        @"(\d{4})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})\s+(\d{1,2})\s*[.:]\s*(\d{2})(?:\s*[.:]\s*(\d{2}))?",
+        @"(\d{1,4})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,4})\s*[T ]?\s*(\d{1,2})\s*[.:]\s*(\d{2})(?:\s*[.:]\s*(\d{2}))?",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     public static DateTime? ParseOverlayDateTime(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return null;
-        var s = CollapseDigits(text.Replace('\r', ' ').Replace('\n', ' '));
-        var m = DateTimeOverlay.Match(s);
-        if (!m.Success) return null;
+        var raw = text.Replace('\r', ' ').Replace('\n', ' ');
+        // Пробуем и «сырой» текст, и склеенный: CollapseDigits нужен, когда OCR
+        // рвёт цифры пробелами, но он же убирает пробел между датой и временем.
+        foreach (var s in new[] { raw, CollapseDigits(raw) })
+        {
+            foreach (var m in DateTimeOverlay.Matches(s).Cast<Match>())
+            {
+                if (TryBuildDateTime(m, out var dt))
+                    return dt;
+            }
+        }
+        return null;
+    }
 
-        var sec = m.Groups[6].Success ? int.Parse(m.Groups[6].Value, CultureInfo.InvariantCulture) : 0;
+    private static bool TryBuildDateTime(Match m, out DateTime value)
+    {
+        value = default;
+        if (!int.TryParse(m.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var a)
+            || !int.TryParse(m.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var month)
+            || !int.TryParse(m.Groups[3].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var c)
+            || !int.TryParse(m.Groups[4].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var hour)
+            || !int.TryParse(m.Groups[5].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var minute))
+            return false;
+
+        // Год — та группа, что больше 31: так ДД-ММ-ГГГГ и ГГГГ-ММ-ДД различаются без догадок.
+        int year, day;
+        if (c > 31)
+        {
+            year = c;
+            day = a;
+        }
+        else if (a > 31)
+        {
+            year = a;
+            day = c;
+        }
+        else
+        {
+            return false;
+        }
+
+        if (year < 100) year += 2000;
+        var sec = m.Groups[6].Success
+            ? int.Parse(m.Groups[6].Value, CultureInfo.InvariantCulture)
+            : 0;
+        if (year is < 2000 or > 2100 || month is < 1 or > 12 || day is < 1 or > 31
+            || hour > 23 || minute > 59 || sec > 59)
+            return false;
+
         try
         {
-            return new DateTime(
-                int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture),
-                int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture),
-                int.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture),
-                int.Parse(m.Groups[4].Value, CultureInfo.InvariantCulture),
-                int.Parse(m.Groups[5].Value, CultureInfo.InvariantCulture),
-                sec,
-                DateTimeKind.Unspecified);
+            value = new DateTime(year, month, day, hour, minute, sec, DateTimeKind.Unspecified);
+            return true;
         }
-        catch
+        catch (ArgumentOutOfRangeException)
         {
-            return null;
+            return false;
         }
     }
 
@@ -111,20 +154,18 @@ public static class GpsOverlayOcrParser
             && IsValidPair(latDash, lonDash))
             return (latDash, lonDash);
 
+        // Раньше здесь дробный хвост долготы достраивался константой 131.0 —
+        // жёстко вшитым градусом Владивостока. За пределами Приморья это молча
+        // подставляло неверные координаты, поэтому обрывок долготы больше не
+        // достраиваем: широту вернуть можно, долготу — нет.
         var frag = LonFragBeforeN.Match(normalized);
         if (frag.Success)
         {
             var latStr = frag.Groups[3].Success
                 ? $"{frag.Groups[2].Value}.{frag.Groups[3].Value}"
                 : frag.Groups[2].Value;
-            if (int.TryParse(frag.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var lonTail)
-                && TryParseCoord(latStr, out var latF)
-                && lonTail is >= 500 and <= 999)
-            {
-                var lonF = 131.0 + lonTail / 1000.0;
-                if (IsValidPair(latF, lonF))
-                    return (latF, lonF);
-            }
+            if (TryParseCoord(latStr, out var latF) && latF is >= 40 and <= 70)
+                return (latF, null);
         }
 
         var lonM = Regex.Match(normalized, @"E\s*(\d{1,3}[.,]\d{1,8})", RegexOptions.IgnoreCase);

@@ -12,6 +12,20 @@ internal static class OverlayImagePrep
         string imagePath, GpsOcrOptions options)
     {
         using var image = Image.Load<Rgb24>(imagePath);
+        return CreateStrips(image, options);
+    }
+
+    /// <summary>Кадр уже в памяти: ffmpeg пишет JPEG в пайп, промежуточного файла нет.</summary>
+    public static (byte[] LeftPng, byte[] RightPng, int FrameWidth, int FrameHeight) CreateStrips(
+        byte[] jpegBytes, GpsOcrOptions options)
+    {
+        using var image = Image.Load<Rgb24>(jpegBytes);
+        return CreateStrips(image, options);
+    }
+
+    private static (byte[] LeftPng, byte[] RightPng, int FrameWidth, int FrameHeight) CreateStrips(
+        Image<Rgb24> image, GpsOcrOptions options)
+    {
         if (image.Width < 1280)
         {
             var scale = 1280.0 / image.Width;

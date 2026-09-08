@@ -30,7 +30,8 @@
                 Видео: @_selectedVideoName (@FormatFileSize(_selectedVideoFile.Size))
             </MudAlert>
             <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
-                <MudNumericField T="int" @bind-Value="_videoIntervalSec" Label="Интервал (сек)" Min="1" Max="60" Style="width:120px;" Disabled="@_processing" />
+                <MudNumericField T="double" @bind-Value="_videoSampleFps" Label="Кадров/сек" Min="0.2" Max="15" Step="0.5"
+                                 HelperText="Голосованию нужно 2+ кадра на машину" Style="width:150px;" Disabled="@_processing" />
                 <MudCheckBox T="bool" @bind-Value="_saveVideoToDb" Label="Сохранять в БД" Color="Color.Primary" Disabled="@_processing" />
                 <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@_processing" OnClick="ProcessVideoOnServer">
                     Распознать номера по видео
@@ -113,7 +114,7 @@
                 Файл: @_selectedVideoName (@FormatFileSize(_selectedVideoFile?.Size ?? 0))
             </MudText>
             <MudText Typo="Typo.body2">
-                Интервал: @_videoSummary.IntervalSec с, кадров: @_videoSummary.TotalFrames,
+                Выборка: @_videoSampleFps.ToString("0.##") кадр/с, кадров: @_videoSummary.TotalFrames,
                 с номерами: @_videoSummary.FramesWithPlates,
                 всего: @_videoSummary.TotalPlates,
                 уникальных: @_videoSummary.UniquePlates
@@ -142,7 +143,7 @@
 @code {
     private bool _processing;
     private string? _imagePreviewUrl;
-    private int _videoIntervalSec = 1;
+    private double _videoSampleFps = 3.0;
     private bool _saveVideoToDb;
     private ProcessFrameResponse? _lastResponse;
     private readonly List<VideoPlateHit> _videoResults = new();
@@ -295,14 +296,14 @@
         StateHasChanged();
         try
         {
-            var interval = Math.Clamp(_videoIntervalSec, 1, 60);
+            var sampleFps = Math.Clamp(_videoSampleFps, 0.2, 15.0);
             var progress = new Progress<VideoProcessProgress>(p =>
             {
                 ApplyServerProgress(p);
                 _ = InvokeAsync(StateHasChanged);
             });
             await using var stream = _selectedVideoFile.OpenReadStream(maxAllowedSize: 1024 * 1024 * 1024);
-            var apiResponse = await Records.ProcessVideoAsync(stream, _selectedVideoFile.Name, interval, progress);
+            var apiResponse = await Records.ProcessVideoAsync(stream, _selectedVideoFile.Name, sampleFps, progress);
             if (apiResponse == null)
             {
                 Logger.LogWarning("ProcessVideoOnServer: apiResponse=null");
