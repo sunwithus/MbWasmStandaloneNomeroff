@@ -26,6 +26,7 @@ public sealed class FolderWatchService : BackgroundService
 
     private int _drainAndStop;
     private CancellationTokenSource? _runCts;
+    private DateTime _lastIbWarnUtc;
 
     public FolderWatchService(
         FolderWatchState state,
@@ -172,7 +173,7 @@ public sealed class FolderWatchService : BackgroundService
 
         if (cfg.SaveToDb && !await IsInterbaseAvailableAsync(ct))
         {
-            _logger.LogDebug("Disk-queue: InterBase недоступен, ждём ({Count} jobs)", jobs.Count);
+            _logger.LogWarning("Disk-queue: InterBase недоступен, ждём ({Count} jobs)", jobs.Count);
             return false;
         }
 
@@ -391,26 +392,45 @@ public sealed class FolderWatchService : BackgroundService
         try
         {
             using var scope = _scopeFactory.CreateScope();
+            var records = scope.ServiceProvider.GetRequiredService<RecordsService>();
             var dbManager = scope.ServiceProvider.GetRequiredService<Nomeroff.Interbase.Api.Interbase.DbManager>();
             var ib = scope.ServiceProvider.GetRequiredService<Nomeroff.Interbase.Api.Interbase.NomeroffInterbaseService>();
-            var list = dbManager.ListDatabases();
-            if (list.Count == 0 && !ib.IsConfigured)
+
+            var existed = dbManager.DatabaseExists(Nomeroff.Interbase.Api.Interbase.DbManager.DailyFileName());
+            var db = await records.GetOrCreateCurrentDbAsync(ct);
+            if (string.IsNullOrWhiteSpace(db))
+                db = Nomeroff.Interbase.Api.Interbase.DbManager.DailyFileName();
+
+            if (!existed && dbManager.DatabaseExists(db))
+                _state.Log("ok", $"Создана БД {db}");
+
+            if (!dbManager.DatabaseExists(db))
+            {
+                WarnInterbase($"нет файла {db} в {dbManager.DbFolder} (архив {dbManager.ArchivePath})");
                 return false;
-            var db = list.FirstOrDefault() ?? _config["Interbase:DefaultDb"];
-            var connStr = !string.IsNullOrWhiteSpace(db)
-                ? dbManager.GetConnectionString(db)
-                : (_config["Interbase:ConnectionString"] ?? "");
-            if (string.IsNullOrWhiteSpace(connStr))
-                return ib.IsConfigured;
-            var svc = ib.WithConnection(connStr);
-            var (ok, _) = await svc.TestConnectionAsync(ct);
+            }
+
+            var connStr = dbManager.GetConnectionString(db);
+            var (ok, msg) = await ib.WithConnection(connStr).TestConnectionAsync(ct);
+            if (!ok)
+                WarnInterbase($"{db}: {msg}");
             return ok;
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "InterBase availability check failed");
+            _logger.LogWarning(ex, "InterBase availability check failed");
+            WarnInterbase(ex.Message);
             return false;
         }
+    }
+
+    private void WarnInterbase(string detail)
+    {
+        if (DateTime.UtcNow - _lastIbWarnUtc < TimeSpan.FromMinutes(1))
+            return;
+        _lastIbWarnUtc = DateTime.UtcNow;
+        _state.Log("error", $"InterBase недоступен: {detail}");
+        _logger.LogWarning("InterBase недоступен: {Detail}", detail);
     }
 
     private void ApplyAfterAction(string path, FolderWatchConfig cfg, string? preferredName = null)

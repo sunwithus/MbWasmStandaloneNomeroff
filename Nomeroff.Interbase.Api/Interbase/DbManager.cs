@@ -49,6 +49,45 @@ public class DbManager
 
     public string DataSource => _dataSource;
     public int Port => _port;
+    public string ArchivePath => _archivePath;
+
+    /// <summary>Имя дневной БД: 2026-09-10.IBS</summary>
+    public static string DailyFileName(DateTime? localDate = null)
+        => (localDate ?? DateTime.Now).ToString("yyyy-MM-dd") + ".IBS";
+
+    public string NormalizeFileName(string dbFileName)
+    {
+        var name = Path.GetFileName(dbFileName.Trim());
+        if (!name.EndsWith(".IBS", StringComparison.OrdinalIgnoreCase))
+            name += ".IBS";
+        return name;
+    }
+
+    public bool DatabaseExists(string dbFileName)
+    {
+        if (string.IsNullOrWhiteSpace(dbFileName))
+            return false;
+        return File.Exists(Path.Combine(_dbFolder, NormalizeFileName(dbFileName)));
+    }
+
+    /// <summary>Создать .IBS из empty38.zip, если файла ещё нет.</summary>
+    public async Task<(bool exists, bool created, string fileName, string message)> EnsureDatabaseAsync(
+        string fileName,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+            return (false, false, "", "Укажите имя файла.");
+
+        fileName = NormalizeFileName(fileName);
+        if (DatabaseExists(fileName))
+            return (true, false, fileName, $"Файл {fileName} уже существует.");
+
+        var (ok, msg) = await CreateFromArchiveAsync(fileName, ct);
+        if (ok || DatabaseExists(fileName))
+            return (true, ok, fileName, ok ? $"БД создана: {fileName}" : msg);
+
+        return (false, false, fileName, msg);
+    }
 
     /// <summary>Создать новую БД копированием из архива empty38.zip (извлекается EMPTY38.IBS).</summary>
     /// <param name="newFileName">Имя нового файла, например MyDb.IBS</param>

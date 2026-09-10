@@ -14,5 +14,9 @@
   <ItemGroup>
     <ProjectReference Include="..\Nomeroff.Shared\Nomeroff.Shared.csproj" />
     <ProjectReference Include="..\Nomeroff.Video.Api\Nomeroff.Video.Api.csproj" />
+    <ProjectReference Include="..\Nomeroff.Interbase.Api\Nomeroff.Interbase.Api.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\Nomeroff.Interbase.Api\empty38.zip" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\Nomeroff.Interbase.Api\empty38.zip')" />
   </ItemGroup>
 </Project>

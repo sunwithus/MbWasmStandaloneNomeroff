@@ -64,12 +64,12 @@ public class OverlayDateTimeTests
     }
 
     [Fact]
-    public async Task ResolveStartUtcAsync_UsesOriginalNameWhenPathIsGuid()
+    public async Task ResolveFallbackStartUtcAsync_UsesFileNameBeforeFfprobe()
     {
         var tmp = Path.GetTempFileName();
         try
         {
-            var (utc, source) = await VideoTimestamps.ResolveStartUtcAsync(
+            var (utc, source) = await VideoTimestamps.ResolveFallbackStartUtcAsync(
                 tmp, "ffprobe-missing", CancellationToken.None,
                 "NO20260707-145101-000033F.MP4");
 
@@ -86,6 +86,15 @@ public class OverlayDateTimeTests
         {
             try { File.Delete(tmp); } catch { /* ignore */ }
         }
+    }
+
+    [Fact]
+    public void StartUtcFromOverlay_SubtractsFrameOffset()
+    {
+        var overlay = new DateTime(2026, 7, 7, 14, 51, 11, DateTimeKind.Unspecified);
+        var start = VideoTimestamps.StartUtcFromOverlay(overlay, timeSec: 10);
+        var local = start.ToLocalTime();
+        Assert.Equal(new DateTime(2026, 7, 7, 14, 51, 1), DateTime.SpecifyKind(local, DateTimeKind.Unspecified));
     }
 
     [Theory]

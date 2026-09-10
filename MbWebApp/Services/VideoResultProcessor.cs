@@ -56,7 +56,7 @@ public sealed class VideoResultProcessRequest
 {
     public required ProcessVideoResponse ApiResponse { get; set; }
     public bool SaveToDb { get; set; }
-    public int DedupIntervalSec { get; set; } = 300;
+    public int DedupIntervalSec { get; set; } = PlateTimeDedup.DefaultIntervalSec;
     public bool SkipSaveWithoutGps { get; set; }
     public IReadOnlyList<string> Watchlist { get; set; } = Array.Empty<string>();
     public string? DeviceName { get; set; }
@@ -199,12 +199,22 @@ public class VideoResultProcessor
         if (req.SaveToDb && pending.Count > 0)
         {
             var dbName = await _records.GetOrCreateCurrentDbAsync(ct);
+            var intervalSec = Math.Max(0, req.DedupIntervalSec);
+            var lastByStem = new Dictionary<string, double>(StringComparer.Ordinal);
             var i = 0;
-            foreach (var p in pending)
+            foreach (var p in pending.OrderBy(x => x.TimeSec))
             {
                 ct.ThrowIfCancellationRequested();
                 if (req.SkipSaveWithoutGps && !p.HasGps)
                     continue;
+
+                if (PlateTimeDedup.IsDuplicateAndTouch(lastByStem, p.Plate, p.TimeSec, intervalSec))
+                {
+                    _logger.LogInformation(
+                        "Video dedup {Sec}с: {Plate} @{T:F1}с — уже был в интервале, не пишем",
+                        intervalSec, p.Plate, p.TimeSec);
+                    continue;
+                }
 
                 i++;
                 req.Progress?.Report((i, pending.Count, $"Сохранение в БД: {i} / {pending.Count}"));

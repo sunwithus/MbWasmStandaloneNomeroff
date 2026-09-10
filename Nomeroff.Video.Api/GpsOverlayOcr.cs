@@ -43,10 +43,9 @@ public sealed class GpsOverlayOcr : IDisposable
     /// <summary>
     /// Кадр из пайпа ffmpeg — без промежуточного файла на диске.
     ///
-    /// needDateTime=false пропускает распознавание левой полосы. Время кадра
-    /// считается как «начало записи + TimeSec», а начало берётся из имени файла,
-    /// поэтому OSD-дата нужна лишь как перекрёстная проверка несколько раз за
-    /// ролик, а не в каждом кадре: на замере эта полоса стоила ~1.5 с на кадр.
+    /// needDateTime=true читает левую нижнюю полосу (дата/время регистратора).
+    /// Это основной источник S_DATETIME. Выключаем полосу, когда якорь уже есть:
+    /// дальше время кадра = якорь + TimeSec.
     /// </summary>
     public Task<OverlayOcrResult> TryExtractFromBytesAsync(
         byte[] jpegBytes, string label, bool needDateTime = true, CancellationToken ct = default)
@@ -89,24 +88,30 @@ public sealed class GpsOverlayOcr : IDisposable
         if (!lat.HasValue)
             (lat, lon) = GpsOverlayOcrParser.ParseCoordinates($"{gpsText} {dateText}");
 
-        if (!lat.HasValue && UseTesseract(_options.Engine) && _tesseract?.IsAvailable == true)
+        var needTessDate = needDateTime && !overlayTime.HasValue;
+        if ((!lat.HasValue || needTessDate) && UseTesseract(_options.Engine) && _tesseract?.IsAvailable == true)
         {
-            gpsText = _tesseract.Recognize(rightPng);
-            dateText = needDateTime ? _tesseract.Recognize(leftPng) : "";
-            usedEngine = "Tesseract";
+            if (!lat.HasValue)
+                gpsText = _tesseract.Recognize(rightPng);
+            if (needTessDate)
+                dateText = _tesseract.Recognize(leftPng);
+            usedEngine = usedEngine == null ? "Tesseract" : usedEngine + "+Tesseract";
             overlayTime = GpsOverlayOcrParser.ParseOverlayDateTime(dateText) ?? overlayTime;
-            (lat, lon) = GpsOverlayOcrParser.ParseCoordinates(gpsText);
+            if (!lat.HasValue)
+                (lat, lon) = GpsOverlayOcrParser.ParseCoordinates(gpsText);
         }
 
-        if (lat.HasValue)
+        if (lat.HasValue || overlayTime.HasValue)
         {
-            _logger.LogInformation("GPS OCR ({Engine}): {File} {W}x{H} -> {Lat:F5}, {Lon:F5}, time={Time}",
-                usedEngine, label, fw, fh, lat, lon,
+            _logger.LogInformation("GPS OCR ({Engine}): {File} {W}x{H} -> {Lat}, {Lon}, time={Time}",
+                usedEngine, label, fw, fh,
+                lat.HasValue ? lat.Value.ToString("F5") : "-",
+                lon.HasValue ? lon.Value.ToString("F5") : "-",
                 overlayTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "-");
         }
         else if (_options.LogOcrTextOnMiss)
         {
-            _logger.LogInformation("GPS OCR ({Engine}): {File} — нет GPS. RIGHT=[{Gps}] LEFT=[{Date}]",
+            _logger.LogInformation("GPS OCR ({Engine}): {File} — нет GPS/даты. RIGHT=[{Gps}] LEFT=[{Date}]",
                 usedEngine ?? "none", label,
                 Trim(gpsText), Trim(dateText));
         }

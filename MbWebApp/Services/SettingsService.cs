@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.JSInterop;
 using Microsoft.Extensions.Configuration;
+using Nomeroff.Shared;
 
 namespace MbWebApp.Services;
 
@@ -28,7 +29,7 @@ public class SettingsService
     private readonly string DefaultGpsApiBaseUrl;
     private readonly string DefaultVideoApiBaseUrl;
     private const int DefaultCaptureIntervalMs = 1500;
-    private const int DefaultDedupIntervalSec = 300;
+    private const int DefaultDedupIntervalSec = PlateTimeDedup.DefaultIntervalSec;
 
     private readonly IJSRuntime _js;
     private string? _cachedApiBaseUrl;

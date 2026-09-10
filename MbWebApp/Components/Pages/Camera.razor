@@ -89,7 +89,7 @@
     private Task? _captureLoopTask;
     private int _captureIntervalMs = 1500;
     private readonly Dictionary<string, DateTime> _dedupCache = new();
-    private int _dedupIntervalSec = 300;
+    private int _dedupIntervalSec = 10;
 
     protected override void OnInitialized()
     {

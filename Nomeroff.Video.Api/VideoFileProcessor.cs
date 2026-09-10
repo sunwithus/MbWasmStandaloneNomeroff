@@ -92,10 +92,11 @@ public sealed class VideoFileProcessor
         var ffmpegPath = ResolveFfmpegPath();
         var ffprobePath = ResolveFfprobePath(ffmpegPath);
         var durationSec = await TryProbeDurationSecAsync(ffprobePath, videoPath, ct);
-        var (startUtc, startSource) = await VideoTimestamps.ResolveStartUtcAsync(
+        // Запасная дата (имя файла → ffprobe), пока не прочитан OSD с кадра.
+        var (startUtc, startSource) = await VideoTimestamps.ResolveFallbackStartUtcAsync(
             videoPath, ffprobePath, ct, options.OriginalFileName);
         _logger.LogInformation(
-            "process-video: {File} fps={Fps} batch={Batch} start={Start:O} (источник {Source})",
+            "process-video: {File} fps={Fps} batch={Batch} запасная дата {Start:O} (источник {Source})",
             Path.GetFileName(videoPath), sampleFps, batchSize, startUtc, startSource);
 
         var estimatedFrames = durationSec.HasValue
@@ -132,8 +133,7 @@ public sealed class VideoFileProcessor
         var frameIndex = 0;
         double? lastLat = null;
         double? lastLon = null;
-        // Первое распознанное OSD-время: если начало записи взято из даты файла
-        // (то есть из момента копирования), пересчитываем всё от этой точки.
+        // Первое распознанное OSD-время с кадра — основной источник для БД.
         (DateTime Local, double TimeSec)? osdAnchor = null;
         var dateTimeHits = 0;
         var dateTimeTries = 0;
@@ -172,15 +172,22 @@ public sealed class VideoFileProcessor
         else
             _logger.LogWarning("process-video: GpsOcr выключен — в БД не будет координат из OSD");
 
-        if (VideoTimestamps.IsWeak(startSource) && osdAnchor is { } anchor)
+        if (osdAnchor is { } anchor)
         {
-            var osdStartUtc = DateTime.SpecifyKind(anchor.Local, DateTimeKind.Local)
-                .ToUniversalTime()
-                .AddSeconds(-anchor.TimeSec);
+            var osdStartUtc = VideoTimestamps.StartUtcFromOverlay(anchor.Local, anchor.TimeSec);
             _logger.LogInformation(
-                "process-video: начало записи переопределено по OSD: {Old:O} -> {New:O}",
-                startUtc, osdStartUtc);
+                "process-video: дата из OSD кадра {Osd:yyyy-MM-dd HH:mm:ss} @ {Sec:0.##}с → старт {New:O} (запасной был {Old} {OldStart:O})",
+                anchor.Local, anchor.TimeSec, osdStartUtc, startSource, startUtc);
             startUtc = osdStartUtc;
+            startSource = VideoStartSource.Overlay;
+            foreach (var fr in results)
+                fr.OverlayTimeUtc = startUtc.AddSeconds(fr.TimeSec).ToString("O");
+        }
+        else
+        {
+            _logger.LogWarning(
+                "process-video: OSD с кадра не прочитался — в БД {Source} {Start:O}",
+                startSource, startUtc);
             foreach (var fr in results)
                 fr.OverlayTimeUtc = startUtc.AddSeconds(fr.TimeSec).ToString("O");
         }
@@ -208,9 +215,8 @@ public sealed class VideoFileProcessor
             {
                 if (!_gpsOcr.IsAvailable || f.Index % osdEveryNth != 0)
                     continue;
-                // Дату читаем только пока не набрали проверочных отсчётов: время
-                // кадра всё равно считается от начала записи, а лишняя полоса —
-                // это ~1.5 с CPU на каждый OSD-кадр.
+                // Дату с левого нижнего угла читаем, пока не наберём якорь:
+                // это основной источник S_DATETIME, не имя файла.
                 var needDate = dateTimeHits < osdDateTimeSamples && dateTimeTries < osdDateTimeAttempts;
                 if (needDate)
                     dateTimeTries++;

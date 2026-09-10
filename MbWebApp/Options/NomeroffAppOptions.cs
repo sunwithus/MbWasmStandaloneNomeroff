@@ -32,7 +32,8 @@ public sealed class FolderWatchOptions
     /// <summary>Кадров в секунду на распознавание. Если &gt; 0, перекрывает IntervalSec.</summary>
     public double SampleFps { get; set; } = 3.0;
     public bool SaveToDb { get; set; } = true;
-    public int DedupIntervalSec { get; set; } = 300;
+    /// <summary>Повтор того же номера чаще чем раз в N секунд не пишется в БД. 0 — выкл.</summary>
+    public int DedupIntervalSec { get; set; } = 10;
     public bool SkipSaveWithoutGps { get; set; }
     public string DeviceName { get; set; } = "";
     public int PollSeconds { get; set; } = 5;

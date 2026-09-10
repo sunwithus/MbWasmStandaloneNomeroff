@@ -145,42 +145,23 @@ public class RecordsService
     public async Task<string?> GetOrCreateCurrentDbAsync(CancellationToken ct = default)
     {
         var today = DateTime.Now.ToString("yyyy-MM-dd");
-        var dbFileName = today + ".IBS";
+        var dbFileName = DbManager.DailyFileName();
         var (storedDb, storedDate) = await _settings.GetCurrentDbAsync();
         if (storedDate == today && !string.IsNullOrEmpty(storedDb))
-        {
-            var db = storedDb.EndsWith(".IBS", StringComparison.OrdinalIgnoreCase) ? storedDb : storedDb + ".IBS";
-            await CreateDbIfNeededAsync(db, ct);
-            return db;
-        }
-        _logger?.LogInformation("GetOrCreateCurrentDbAsync: создаём БД {Db} для даты {Date}", dbFileName, today);
-        await CreateDbIfNeededAsync(dbFileName, ct);
-        try { await _settings.SetCurrentDbAsync(dbFileName, today); } catch { /* нет Blazor circuit — ок для folder watch */ }
-        return dbFileName;
-    }
+            dbFileName = _dbManager.NormalizeFileName(storedDb);
 
-    private async Task CreateDbIfNeededAsync(string name, CancellationToken ct)
-    {
-        try
-        {
-            // Прямой вызов DbManager — без HTTP / localStorage :5060
-            var (ok, msg) = await _dbManager.CreateFromArchiveAsync(name, ct);
-            if (ok)
-            {
-                _logger?.LogInformation("CreateDbIfNeededAsync: БД {Name} создана", name);
-                return;
-            }
-            if (msg.Contains("уже", StringComparison.OrdinalIgnoreCase))
-            {
-                _logger?.LogDebug("CreateDbIfNeededAsync: БД {Name} уже существует", name);
-                return;
-            }
-            _logger?.LogWarning("CreateDbIfNeededAsync: не удалось создать {Name}: {Msg}", name, msg);
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogWarning(ex, "CreateDbIfNeededAsync failed for {Name}", name);
-        }
+        var (exists, created, name, msg) = await _dbManager.EnsureDatabaseAsync(dbFileName, ct);
+        if (created)
+            _logger?.LogInformation("GetOrCreateCurrentDbAsync: создана БД {Db} в {Folder}", name, _dbManager.DbFolder);
+        else if (exists)
+            _logger?.LogDebug("GetOrCreateCurrentDbAsync: БД {Db} уже есть", name);
+        else
+            _logger?.LogWarning(
+                "GetOrCreateCurrentDbAsync: не удалось создать {Db} в {Folder} (архив {Archive}): {Msg}",
+                name, _dbManager.DbFolder, _dbManager.ArchivePath, msg);
+
+        try { await _settings.SetCurrentDbAsync(name, today); } catch { /* нет Blazor circuit — ок для folder watch */ }
+        return name;
     }
 
     public async Task<bool> SaveRecordAsync(RecordDto record, CancellationToken ct = default)

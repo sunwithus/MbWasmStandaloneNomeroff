@@ -21,7 +21,7 @@ public sealed class FolderWatchConfig
     /// <summary>Кадров в секунду на распознавание. Голосованию нужно &gt;= 2 кадра на машину.</summary>
     public double SampleFps { get; set; } = 3.0;
     public bool SaveToDb { get; set; } = true;
-    public int DedupIntervalSec { get; set; } = 300;
+    public int DedupIntervalSec { get; set; } = Nomeroff.Shared.PlateTimeDedup.DefaultIntervalSec;
     public bool SkipSaveWithoutGps { get; set; }
     public string DeviceName { get; set; } = "";
     public List<string> Watchlist { get; set; } = new();
@@ -248,6 +248,17 @@ public sealed class FolderWatchState
             CurrentFile = null;
             Percent = 0;
             Message = Running ? "Ошибка, ждём следующий файл..." : "Остановлено";
+        }
+        Notify();
+    }
+
+    public void Log(string level, string message)
+    {
+        lock (_lock)
+        {
+            AddLogLocked(level, message);
+            if (!Processing)
+                Message = message;
         }
         Notify();
     }

@@ -9,15 +9,15 @@ namespace Nomeroff.Video.Api;
 public enum VideoStartSource
 {
     None,
+    Overlay,
     FileName,
     ProbeCreationTime,
     FileWriteTime
 }
 
 /// <summary>
-/// Время начала видеозаписи. Источники по убыванию надёжности:
-/// имя файла регистратора, creation_time из ffprobe, время записи файла на диск.
-/// Время кадра = начало записи + TimeSec. DateTime.Now не используется никогда.
+/// Время кадра для БД. Источники по убыванию:
+/// OSD в левом нижнем углу кадра → метка в имени файла → creation_time из ffprobe.
 /// </summary>
 public static class VideoTimestamps
 {
@@ -146,12 +146,10 @@ public static class VideoTimestamps
         }
     }
 
-    /// <summary>Итоговое начало записи в UTC + откуда оно взято.</summary>
-    /// <param name="nameHint">
-    /// Исходное имя регистратора, если на диске файл лежит под другим именем
-    /// (загрузка, disk-queue с GUID). Без подсказки остаётся только дата файла.
-    /// </param>
-    public static async Task<(DateTime StartUtc, VideoStartSource Source)> ResolveStartUtcAsync(
+    /// <summary>
+    /// Запасная дата, если OSD с кадра не прочитался: имя файла, затем ffprobe.
+    /// </summary>
+    public static async Task<(DateTime StartUtc, VideoStartSource Source)> ResolveFallbackStartUtcAsync(
         string videoPath,
         string ffprobePath,
         CancellationToken ct,
@@ -176,12 +174,21 @@ public static class VideoTimestamps
         }
     }
 
-    /// <summary>
-    /// Время записи файла на диск — это момент копирования, а не съёмки, поэтому
-    /// такому началу отсчёта OSD предпочтительнее.
-    /// </summary>
-    public static bool IsWeak(VideoStartSource source) =>
-        source is VideoStartSource.None or VideoStartSource.FileWriteTime;
+    /// <summary>Совместимость: то же, что запасная цепочка без OSD.</summary>
+    public static Task<(DateTime StartUtc, VideoStartSource Source)> ResolveStartUtcAsync(
+        string videoPath,
+        string ffprobePath,
+        CancellationToken ct,
+        string? nameHint = null) =>
+        ResolveFallbackStartUtcAsync(videoPath, ffprobePath, ct, nameHint);
+
+    /// <summary>Начало записи по OSD: время на кадре минус смещение кадра от старта.</summary>
+    public static DateTime StartUtcFromOverlay(DateTime overlayLocal, double timeSec)
+    {
+        return DateTime.SpecifyKind(overlayLocal, DateTimeKind.Local)
+            .ToUniversalTime()
+            .AddSeconds(-timeSec);
+    }
 
     /// <summary>
     /// Сверить время кадра из OSD с расчётным (начало + TimeSec).
