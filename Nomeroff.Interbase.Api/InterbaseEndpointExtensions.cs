@@ -179,11 +179,19 @@ public static class InterbaseEndpointExtensions
             logger.LogInformation(
                 "/api/records: вызов SaveRecordAsync: deviceId={DeviceId}, carNumber={CarNumber}, belong={Belong}, lat={Lat}, lon={Lon}, imageSize={Size}, plateSize={Plate}, timeUtc={TimeUtc}",
                 deviceId, carNumber, belong, lat, lon, screenshotBlob?.Length ?? 0, plateBlob?.Length ?? 0, req.TimeUtc);
-            var id = await service.SaveRecordAsync(
-                deviceId, carNumber, lat, lon, screenshotBlob,
-                timeUtc: req.TimeUtc, belong: belong, plateBlob: plateBlob);
-            logger.LogInformation("/api/records: запись сохранена, id={Id}", id);
-            return Results.Ok(new { id });
+            try
+            {
+                var id = await service.SaveRecordAsync(
+                    deviceId, carNumber, lat, lon, screenshotBlob,
+                    timeUtc: req.TimeUtc, belong: belong, plateBlob: plateBlob);
+                logger.LogInformation("/api/records: запись сохранена, id={Id}", id);
+                return Results.Ok(new { id });
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "/api/records: SaveRecordAsync failed");
+                return Results.Problem(detail: ex.Message, statusCode: 500);
+            }
         });
 
         app.MapGet("/api/db/list", (DbManager dbManager) =>

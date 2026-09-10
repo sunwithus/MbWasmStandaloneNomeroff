@@ -314,8 +314,8 @@ WHERE RDB$RELATION_NAME = 'SPR_SP_FOTO_TABLE' AND RDB$FIELD_NAME = 'F_PLATE'", c
         {
             conn = GetConnection(_connectionString);
             await EnsureGeneratorAsync(conn, ct);
-            if (plateBlob != null && plateBlob.Length > 0)
-                await EnsureFPlateColumnAsync(conn, ct);
+            // Колонку кропа готовим всегда: запись фото ниже ссылается на F_PLATE.
+            await EnsureFPlateColumnAsync(conn, ct);
 
             using var transaction = conn.BeginTransaction();
             long newKey;
@@ -387,14 +387,14 @@ WHERE RDB$RELATION_NAME = 'SPR_SP_FOTO_TABLE' AND RDB$FIELD_NAME = 'F_PLATE'", c
         using (var command = new IBCommand(sql, conn, transaction))
         {
             command.Parameters.Add("@S_INCKEY", IBDbType.BigInt).Value = newKey;
-            command.Parameters.AddWithValue("@S_TYPE", IBDbType.Integer).Value = 0;
-            command.Parameters.AddWithValue("@S_PRELOOKED", IBDbType.Integer).Value = 0;
-            command.Parameters.AddWithValue("@S_DEVICEID", IBDbType.VarChar).Value = deviceIdWin;
-            command.Parameters.AddWithValue("@S_DATETIME", IBDbType.TimeStamp).Value = when;
-            command.Parameters.AddWithValue("@S_NOTICE", IBDbType.VarChar).Value = noticeWin;
-            command.Parameters.AddWithValue("@S_CALLTYPE", IBDbType.Integer).Value = 2;
-            command.Parameters.AddWithValue("@S_SELSTATUS", IBDbType.SmallInt).Value = 0;
-            command.Parameters.AddWithValue("@S_BELONG", IBDbType.VarChar).Value = belongWin;
+            command.Parameters.Add("@S_TYPE", IBDbType.Integer).Value = 0;
+            command.Parameters.Add("@S_PRELOOKED", IBDbType.Integer).Value = 0;
+            command.Parameters.Add("@S_DEVICEID", IBDbType.VarChar).Value = deviceIdWin;
+            command.Parameters.Add("@S_DATETIME", IBDbType.TimeStamp).Value = when;
+            command.Parameters.Add("@S_NOTICE", IBDbType.VarChar).Value = noticeWin;
+            command.Parameters.Add("@S_CALLTYPE", IBDbType.Integer).Value = 2;
+            command.Parameters.Add("@S_SELSTATUS", IBDbType.SmallInt).Value = 0;
+            command.Parameters.Add("@S_BELONG", IBDbType.VarChar).Value = belongWin;
             await command.ExecuteNonQueryAsync(ct);
         }
 
@@ -408,9 +408,9 @@ WHERE RDB$RELATION_NAME = 'SPR_SP_FOTO_TABLE' AND RDB$FIELD_NAME = 'F_PLATE'", c
             using (var cmd = new IBCommand(geoSql, conn, transaction))
             {
                 cmd.Parameters.Add("@Key", IBDbType.BigInt).Value = newKey;
-                cmd.Parameters.AddWithValue("@Order", IBDbType.Integer).Value = 0;
-                cmd.Parameters.AddWithValue("@Lat", IBDbType.Double).Value = latitude.Value;
-                cmd.Parameters.AddWithValue("@Lon", IBDbType.Double).Value = longitude.Value;
+                cmd.Parameters.Add("@Order", IBDbType.Integer).Value = 0;
+                cmd.Parameters.Add("@Lat", IBDbType.Double).Value = latitude.Value;
+                cmd.Parameters.Add("@Lon", IBDbType.Double).Value = longitude.Value;
                 await cmd.ExecuteNonQueryAsync(ct);
             }
             _logger?.LogInformation("SaveRecordAsync: SPR_SP_GEO_TABLE OK");
@@ -435,15 +435,22 @@ WHERE RDB$RELATION_NAME = 'SPR_SP_FOTO_TABLE' AND RDB$FIELD_NAME = 'F_PLATE'", c
                 screenshotBlob?.Length ?? 0, plateBlob?.Length ?? 0);
         }
 
-        var fotoSql = @"
-            INSERT INTO SPR_SP_FOTO_TABLE (S_INCKEY, F_IMAGE, F_PLATE)
-            VALUES (@Key, @Image, @Plate)";
-        using (var cmd = new IBCommand(fotoSql, conn, transaction))
+        // InterBase 2007/2009 + InterBaseSql: несколько BLOB с @ в одном INSERT
+        // уходят на сервер как есть → «Token unknown @» (−104). В Shield тот же
+        // обход: ключ литералом, по одному BLOB на statement (SPR_SP_COMMENT).
+        var imgSql = $"INSERT INTO SPR_SP_FOTO_TABLE (S_INCKEY, F_IMAGE) VALUES ({newKey}, @F_IMAGE)";
+        using (var cmd = new IBCommand(imgSql, conn, transaction))
         {
-            cmd.Parameters.Add("@Key", IBDbType.BigInt).Value = newKey;
-            cmd.Parameters.Add("@Image", IBDbType.Binary).Value =
+            cmd.Parameters.Add("@F_IMAGE", IBDbType.Binary).Value =
                 hasFull ? screenshotBlob! : (object)DBNull.Value;
-            cmd.Parameters.Add("@Plate", IBDbType.Binary).Value =
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        if (await HasFPlateColumnAsync(conn, ct))
+        {
+            var plateSql = $"UPDATE SPR_SP_FOTO_TABLE SET F_PLATE = @F_PLATE WHERE S_INCKEY = {newKey}";
+            using var cmd = new IBCommand(plateSql, conn, transaction);
+            cmd.Parameters.Add("@F_PLATE", IBDbType.Binary).Value =
                 hasPlate ? plateBlob! : (object)DBNull.Value;
             await cmd.ExecuteNonQueryAsync(ct);
         }
