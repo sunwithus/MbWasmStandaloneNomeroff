@@ -48,6 +48,55 @@ public class OverlayDateTimeTests
     public void TryParseFromFileName_ReturnsNullWithoutStamp(string path)
         => Assert.Null(VideoTimestamps.TryParseFromFileName(path));
 
+    /// <summary>
+    /// Загрузка через браузер складывала ролик во временную папку под именем
+    /// «video.mp4» — метка регистратора терялась, и в БД шло время обработки.
+    /// </summary>
+    [Fact]
+    public void SafeTempFileName_KeepsRecorderStampAndSurvivesParsing()
+    {
+        var name = VideoTimestamps.SafeTempFileName("NO20260707-145101-000033F.MP4");
+
+        Assert.Equal("NO20260707-145101-000033F.MP4", name);
+        Assert.Equal(
+            new DateTime(2026, 7, 7, 14, 51, 1, DateTimeKind.Local),
+            VideoTimestamps.TryParseFromFileName(name));
+    }
+
+    [Fact]
+    public async Task ResolveStartUtcAsync_UsesOriginalNameWhenPathIsGuid()
+    {
+        var tmp = Path.GetTempFileName();
+        try
+        {
+            var (utc, source) = await VideoTimestamps.ResolveStartUtcAsync(
+                tmp, "ffprobe-missing", CancellationToken.None,
+                "NO20260707-145101-000033F.MP4");
+
+            Assert.Equal(VideoStartSource.FileName, source);
+            var local = utc.ToLocalTime();
+            Assert.Equal(2026, local.Year);
+            Assert.Equal(7, local.Month);
+            Assert.Equal(7, local.Day);
+            Assert.Equal(14, local.Hour);
+            Assert.Equal(51, local.Minute);
+            Assert.Equal(1, local.Second);
+        }
+        finally
+        {
+            try { File.Delete(tmp); } catch { /* ignore */ }
+        }
+    }
+
+    [Theory]
+    [InlineData(@"C:\evil\..\NO20260707-145101.MP4", "NO20260707-145101.MP4")]
+    [InlineData("../../NO20260707-145101.MP4", "NO20260707-145101.MP4")]
+    [InlineData("", "video.mp4")]
+    [InlineData("..", "video.mp4")]
+    [InlineData("clip", "clip.mp4")]
+    public void SafeTempFileName_DropsPathsAndKeepsExtension(string input, string expected)
+        => Assert.Equal(expected, VideoTimestamps.SafeTempFileName(input));
+
     [Fact]
     public void OverlayAgreesWithExpected_AcceptsSmallDriftAndRejectsBigOne()
     {

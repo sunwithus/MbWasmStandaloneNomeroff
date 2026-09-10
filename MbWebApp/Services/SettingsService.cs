@@ -39,13 +39,10 @@ public class SettingsService
         _configuration = configuration;
         _logger = logger;
         // Только appsettings / env — не localStorage (там часто старый :5060 после переноса)
-        DefaultApiBaseUrl = (configuration["NomeroffApiBaseUrl"] ?? "http://127.0.0.1:8000").TrimEnd('/');
+        DefaultApiBaseUrl = MbWebApp.Options.AppPorts.OcrBaseUrl(configuration).TrimEnd('/');
         var appBase = (configuration["AppBaseUrl"] ?? "").Trim().TrimEnd('/');
         if (string.IsNullOrEmpty(appBase))
-        {
-            var urls = configuration["Urls"] ?? "http://127.0.0.1:5555";
-            appBase = urls.Replace("0.0.0.0", "127.0.0.1", StringComparison.Ordinal).TrimEnd('/');
-        }
+            appBase = MbWebApp.Options.AppPorts.AppBaseUrl(configuration);
         DefaultRecordsApiBaseUrl = appBase;
         DefaultGpsApiBaseUrl = appBase;
         DefaultVideoApiBaseUrl = appBase;

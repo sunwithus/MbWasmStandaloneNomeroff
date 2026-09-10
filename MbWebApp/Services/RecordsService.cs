@@ -234,7 +234,7 @@ public class RecordsService
         try
         {
             // В том же процессе (без HTTP на старый :5060 из localStorage)
-            return await RunVideoProcessorAsync(videoPath, sampleFps, progress, ct);
+            return await RunVideoProcessorAsync(videoPath, sampleFps, progress, ct, videoPath);
         }
         catch (InvalidOperationException)
         {
@@ -258,9 +258,9 @@ public class RecordsService
         try
         {
             Directory.CreateDirectory(tempDir);
-            var ext = Path.GetExtension(fileName);
-            if (string.IsNullOrEmpty(ext)) ext = ".mp4";
-            var videoPath = Path.Combine(tempDir, "video" + ext);
+            // Имя файла регистратора несёт время съёмки (NO20260707-145101…): под
+            // именем "video.mp4" оно терялось, и в БД уходило время загрузки.
+            var videoPath = Path.Combine(tempDir, VideoTimestamps.SafeTempFileName(fileName));
 
             progress?.Report(new VideoProcessProgress
             {
@@ -272,7 +272,7 @@ public class RecordsService
             await using (var fs = File.Create(videoPath))
                 await videoStream.CopyToAsync(fs, ct);
 
-            return await RunVideoProcessorAsync(videoPath, sampleFps, progress, ct);
+            return await RunVideoProcessorAsync(videoPath, sampleFps, progress, ct, fileName);
         }
         catch (InvalidOperationException)
         {
@@ -293,14 +293,15 @@ public class RecordsService
         string videoPath,
         double sampleFps,
         IProgress<VideoProcessProgress>? progress,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? originalFileName = null)
     {
         ProcessVideoResponse? result = null;
         string? error = null;
 
         await _videoProcessor.ProcessAsync(
             videoPath,
-            new VideoProcessOptions { SampleFps = sampleFps },
+            new VideoProcessOptions { SampleFps = sampleFps, OriginalFileName = originalFileName ?? videoPath },
             async (payload, token) =>
             {
                 if (payload is VideoProcessEmitResult typed)

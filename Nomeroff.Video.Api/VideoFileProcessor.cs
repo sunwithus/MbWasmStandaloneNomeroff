@@ -18,6 +18,12 @@ public sealed class VideoProcessOptions
     /// <summary>Устаревший вход из UI: 1/intervalSec. Задаёт SampleFps, если он не указан.</summary>
     public static VideoProcessOptions FromIntervalSec(int intervalSec) =>
         new() { SampleFps = intervalSec > 0 ? 1.0 / intervalSec : 1.0 };
+
+    /// <summary>
+    /// Исходное имя файла регистратора, если <c>videoPath</c> — временная копия
+    /// или GUID из disk-queue. Нужно, чтобы вытащить дату съёмки из имени.
+    /// </summary>
+    public string? OriginalFileName { get; set; }
 }
 
 /// <summary>
@@ -70,6 +76,11 @@ public sealed class VideoFileProcessor
         var minDetConfidence = Math.Clamp(_config.GetValue("PlateMinConfidence", 0.60), 0.0, 1.0);
         var osdEveryNth = Math.Max(1, _config.GetValue("GpsOcr:EveryNthFrame", 5));
         var osdDateTimeSamples = Math.Max(0, _config.GetValue("GpsOcr:DateTimeSamples", 3));
+        // Ограничение на попытки, а не на успехи: если первые кадры OSD не
+        // прочитались, дату всё равно надо добрать — иначе ролик без метки
+        // времени в имени файла уезжает в БД со временем обработки.
+        var osdDateTimeAttempts = Math.Max(
+            osdDateTimeSamples, _config.GetValue("GpsOcr:DateTimeMaxAttempts", 12));
         var storeMaxWidth = _config.GetValue("StorageImage:MaxWidth", 1920);
         var storeJpegQuality = _config.GetValue("StorageImage:JpegQuality", 90);
 
@@ -81,7 +92,8 @@ public sealed class VideoFileProcessor
         var ffmpegPath = ResolveFfmpegPath();
         var ffprobePath = ResolveFfprobePath(ffmpegPath);
         var durationSec = await TryProbeDurationSecAsync(ffprobePath, videoPath, ct);
-        var (startUtc, startSource) = await VideoTimestamps.ResolveStartUtcAsync(videoPath, ffprobePath, ct);
+        var (startUtc, startSource) = await VideoTimestamps.ResolveStartUtcAsync(
+            videoPath, ffprobePath, ct, options.OriginalFileName);
         _logger.LogInformation(
             "process-video: {File} fps={Fps} batch={Batch} start={Start:O} (источник {Source})",
             Path.GetFileName(videoPath), sampleFps, batchSize, startUtc, startSource);
@@ -123,7 +135,8 @@ public sealed class VideoFileProcessor
         // Первое распознанное OSD-время: если начало записи взято из даты файла
         // (то есть из момента копирования), пересчитываем всё от этой точки.
         (DateTime Local, double TimeSec)? osdAnchor = null;
-        var dateTimeReads = 0;
+        var dateTimeHits = 0;
+        var dateTimeTries = 0;
 
         try
         {
@@ -198,11 +211,14 @@ public sealed class VideoFileProcessor
                 // Дату читаем только пока не набрали проверочных отсчётов: время
                 // кадра всё равно считается от начала записи, а лишняя полоса —
                 // это ~1.5 с CPU на каждый OSD-кадр.
-                var needDate = dateTimeReads < osdDateTimeSamples;
+                var needDate = dateTimeHits < osdDateTimeSamples && dateTimeTries < osdDateTimeAttempts;
                 if (needDate)
-                    dateTimeReads++;
-                osd[f.Index] = await _gpsOcr.TryExtractFromBytesAsync(
+                    dateTimeTries++;
+                var overlayOcr = await _gpsOcr.TryExtractFromBytesAsync(
                     f.Jpeg, $"t={f.TimeSec:0.##}s", needDate, ct);
+                if (needDate && overlayOcr.OverlayTime.HasValue)
+                    dateTimeHits++;
+                osd[f.Index] = overlayOcr;
             }
 
             var recognized = await RecognizeBatchAsync(
@@ -315,26 +331,36 @@ public sealed class VideoFileProcessor
                              ?? throw new InvalidOperationException(
                                  "Не удалось запустить ffmpeg. Проверьте путь к ffmpeg");
 
-            var stderrTask = proc.StandardError.ReadToEndAsync(ct);
-            var index = 0;
-            await foreach (var jpeg in ReadMjpegStreamAsync(proc.StandardOutput.BaseStream, ct))
+            try
             {
-                await writer.WriteAsync(new RawFrame(index, index / sampleFps, jpeg), ct);
-                index++;
-            }
+                var stderrTask = proc.StandardError.ReadToEndAsync(ct);
+                var index = 0;
+                await foreach (var jpeg in ReadMjpegStreamAsync(proc.StandardOutput.BaseStream, ct))
+                {
+                    await writer.WriteAsync(new RawFrame(index, index / sampleFps, jpeg), ct);
+                    index++;
+                }
 
-            await proc.WaitForExitAsync(ct);
-            var stderr = await stderrTask;
-            if (proc.ExitCode != 0 && index == 0)
-            {
-                _logger.LogError("process-video: ffmpeg exit {Code}. {Stderr}",
-                    proc.ExitCode, Truncate(stderr, 800));
-                failure = new InvalidOperationException(
-                    "ffmpeg завершился с ошибкой. Проверьте формат видео.");
+                await proc.WaitForExitAsync(ct);
+                var stderr = await stderrTask;
+                if (proc.ExitCode != 0 && index == 0)
+                {
+                    _logger.LogError("process-video: ffmpeg exit {Code}. {Stderr}",
+                        proc.ExitCode, Truncate(stderr, 800));
+                    failure = new InvalidOperationException(
+                        "ffmpeg завершился с ошибкой. Проверьте формат видео.");
+                }
+                else if (!string.IsNullOrWhiteSpace(stderr))
+                {
+                    _logger.LogDebug("process-video: ffmpeg stderr {Stderr}", Truncate(stderr, 400));
+                }
             }
-            else if (!string.IsNullOrWhiteSpace(stderr))
+            finally
             {
-                _logger.LogDebug("process-video: ffmpeg stderr {Stderr}", Truncate(stderr, 400));
+                if (!proc.HasExited)
+                {
+                    try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
+                }
             }
         }
         catch (Exception ex)
@@ -579,16 +605,48 @@ public sealed class VideoFileProcessor
 
     private static string ResolveFfmpegPath()
     {
-        var assemblyLocation = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? AppContext.BaseDirectory;
-        var ffmpegPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "ffmpeg.exe"));
-        if (!File.Exists(ffmpegPath))
-            ffmpegPath = Path.GetFullPath(Path.Combine(assemblyLocation, "ffmpeg.exe"));
-        return ffmpegPath;
+        foreach (var dir in CandidateToolDirs())
+        {
+            var ffmpeg = Path.Combine(dir, "ffmpeg.exe");
+            if (File.Exists(ffmpeg))
+                return Path.GetFullPath(ffmpeg);
+        }
+        return "ffmpeg";
     }
 
     private static string ResolveFfprobePath(string ffmpegPath)
     {
-        var ffprobe = Path.Combine(Path.GetDirectoryName(ffmpegPath) ?? "", "ffprobe.exe");
-        return File.Exists(ffprobe) ? ffprobe : "ffprobe";
+        var beside = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(ffmpegPath)) ?? "", "ffprobe.exe");
+        if (File.Exists(beside))
+            return beside;
+        foreach (var dir in CandidateToolDirs())
+        {
+            var ffprobe = Path.Combine(dir, "ffprobe.exe");
+            if (File.Exists(ffprobe))
+                return Path.GetFullPath(ffprobe);
+        }
+        return "ffprobe";
+    }
+
+    /// <summary>
+    /// Каталог приложения, затем вверх по дереву — так находятся ffmpeg/ffprobe
+    /// и в publish, и в корне репозитория (D:\_ANumberRecognition).
+    /// </summary>
+    private static IEnumerable<string> CandidateToolDirs()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var start in new[]
+                 {
+                     AppContext.BaseDirectory,
+                     Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)
+                 })
+        {
+            var dir = string.IsNullOrEmpty(start) ? null : new DirectoryInfo(start);
+            for (var i = 0; i < 8 && dir != null; i++, dir = dir.Parent)
+            {
+                if (seen.Add(dir.FullName))
+                    yield return dir.FullName;
+            }
+        }
     }
 }

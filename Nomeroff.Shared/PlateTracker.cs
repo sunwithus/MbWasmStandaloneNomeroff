@@ -54,15 +54,28 @@ public sealed class PlateTracker
     private readonly double _iouThreshold;
     private readonly double _maxGapSec;
     private readonly double _centerDistanceFactor;
+    private readonly double _sameTextDistanceFactor;
     private readonly List<PlateTrack> _tracks = new();
     private int _nextId = 1;
 
-    /// <summary>Порог IoU низкий: на 3-5 fps номер успевает сместиться на свой размер.</summary>
-    public PlateTracker(double iouThreshold = 0.08, double maxGapSec = 3.0, double centerDistanceFactor = 3.0)
+    /// <summary>
+    /// Порог IoU низкий: на 3-5 fps номер успевает сместиться на свой размер.
+    ///
+    /// sameTextDistanceFactor заметно больше: у края кадра встречная машина за
+    /// кадр проходит три своих ширины, и трек рвался на два — одна машина
+    /// давала две записи в БД. Совпадение текста двух разных машин исключено,
+    /// поэтому такому склеиванию можно позволить больший радиус.
+    /// </summary>
+    public PlateTracker(
+        double iouThreshold = 0.08,
+        double maxGapSec = 3.0,
+        double centerDistanceFactor = 3.0,
+        double sameTextDistanceFactor = 6.0)
     {
         _iouThreshold = iouThreshold;
         _maxGapSec = maxGapSec;
         _centerDistanceFactor = centerDistanceFactor;
+        _sameTextDistanceFactor = Math.Max(centerDistanceFactor, sameTextDistanceFactor);
     }
 
     public IReadOnlyList<PlateTrack> Tracks => _tracks;
@@ -113,12 +126,13 @@ public sealed class PlateTracker
             // Тот же ствол номера — сильный признак, и его хватает на весь maxGap.
             // Без совпадения текста склеиваем только соседние кадры и только
             // если бокс похож по размеру — иначе слипнутся две разные машины.
+            var sameStem = SameStem(track, detection.Plate);
             var distance = CenterDistance(track.LastBbox, detection.Bbox);
-            var reach = Math.Max(Width(track.LastBbox), Width(detection.Bbox)) * _centerDistanceFactor;
+            var reach = Math.Max(Width(track.LastBbox), Width(detection.Bbox))
+                        * (sameStem ? _sameTextDistanceFactor : _centerDistanceFactor);
             if (distance > reach)
                 continue;
 
-            var sameStem = SameStem(track, detection.Plate);
             if (!sameStem && (gap > 1.0 || !SizesComparable(track.LastBbox, detection.Bbox)))
                 continue;
 

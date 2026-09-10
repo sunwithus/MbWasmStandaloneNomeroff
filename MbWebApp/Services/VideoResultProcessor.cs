@@ -246,6 +246,16 @@ public class VideoResultProcessor
     private static double MaxOcrConfidence(PlateTrack track) =>
         track.Detections.Count == 0 ? 0 : track.Detections.Max(d => d.OcrConfidence);
 
+    /// <summary>Лучшая уверенность OCR среди чтений именно этого текста.</summary>
+    private static double MaxOcrConfidence(PlateTrack track, string plate)
+    {
+        var matching = track.Detections
+            .Where(d => string.Equals(d.Plate, plate, StringComparison.Ordinal))
+            .Select(d => d.OcrConfidence)
+            .ToList();
+        return matching.Count == 0 ? 0 : matching.Max();
+    }
+
     /// <summary>
     /// Исключение из правила «нужно 2 кадра»: машину видно один раз, но прочитана
     /// она уверенно и в валидном формате РФ.
@@ -262,7 +272,9 @@ public class VideoResultProcessor
             return false;
         if (!PlateAlphabet.LooksLikeRuPlateWithRegion(plate))
             return false;
-        return MaxOcrConfidence(track) >= _singleSightingMinOcr;
+        // Уверенность именно этого чтения: иначе высокий OCR соседней машины,
+        // попавшей в тот же трек, протаскивал бы в БД сомнительный номер.
+        return MaxOcrConfidence(track, plate) >= _singleSightingMinOcr;
     }
 
     private List<PendingTrackSave> BuildPendingSaves(
@@ -305,18 +317,33 @@ public class VideoResultProcessor
                 plate = fallback.Plate;
             }
 
-            if (track.FrameHits < minFrameHits && !IsConfidentSingleSighting(track, plate))
+            // Считаем кадры, где прочитан ровно этот текст, а не любые чтения трека:
+            // вывеска «АВАРИЙНАЯ» на борту детектится как номер в каждом кадре, но
+            // каждый раз читается иначе, а настоящий номер повторяется дословно.
+            var agreeingHits = string.Equals(plate, vote.Plate, StringComparison.Ordinal)
+                ? vote.AgreeingFrameHits
+                : track.Detections
+                    .Where(d => string.Equals(d.Plate, plate, StringComparison.Ordinal))
+                    .Select(d => Math.Round(d.TimeSec, 2))
+                    .Distinct()
+                    .Count();
+            if (agreeingHits < minFrameHits && !IsConfidentSingleSighting(track, plate))
             {
                 summary.DroppedByFrameHits++;
                 _logger.LogInformation(
-                    "Трек #{Id}: {Plate} встречен в {Hits} кадре(ах) < {Need}, OCR {Ocr:P0} — не пишем (похоже на фантом)",
-                    track.Id, plate, track.FrameHits, minFrameHits, MaxOcrConfidence(track));
+                    "Трек #{Id}: {Plate} прочитан дословно в {Hits} кадре(ах) из {All} < {Need}, OCR {Ocr:P0} — не пишем (похоже на фантом)",
+                    track.Id, plate, agreeingHits, track.FrameHits, minFrameHits, MaxOcrConfidence(track));
                 continue;
             }
 
             // Кадр для фото — где номер крупнее всего, а не последний: к последнему
-            // кадру машина уже уходит из поля зрения.
-            var best = track.Best;
+            // кадру машина уже уходит из поля зрения. Берём только среди чтений
+            // этого же текста, иначе кадр и кроп будут от другой машины трека.
+            var matching = track.Detections
+                .Where(d => string.Equals(d.Plate, plate, StringComparison.Ordinal))
+                .ToList();
+            var best = (matching.Count > 0 ? matching : track.Detections)
+                .Aggregate((a, b) => b.BboxArea > a.BboxArea ? b : a);
             var withGps = track.Detections.FirstOrDefault(d => d.Latitude.HasValue && d.Longitude.HasValue);
             pending.Add(new PendingTrackSave
             {
@@ -328,7 +355,7 @@ public class VideoResultProcessor
                 ImageBase64 = best.FrameImageBase64,
                 PlateImageBase64 = best.PlateImageBase64,
                 Confidence = vote.Confidence,
-                FrameHits = track.FrameHits,
+                FrameHits = agreeingHits,
                 HasGps = (best.Latitude ?? withGps?.Latitude).HasValue
                          && (best.Longitude ?? withGps?.Longitude).HasValue,
                 Candidates = track.Detections

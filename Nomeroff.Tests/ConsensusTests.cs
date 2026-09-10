@@ -77,6 +77,45 @@ public class PlateVoteTests
 
         Assert.Equal(1, result!.FrameHits);
     }
+
+    /// <summary>
+    /// Настоящий номер повторяется дословно, поэтому AgreeingFrameHits близок
+    /// к FrameHits.
+    /// </summary>
+    [Fact]
+    public void Vote_CountsFramesThatAgreeWithVotedText()
+    {
+        var result = PlateVote.Vote(new[]
+        {
+            Read("Х034ХА125", 1.0),
+            Read("Х034ХА125", 1.2),
+            Read("Х084ХА125", 1.4, prob: 0.3)
+        });
+
+        Assert.Equal("Х034ХА125", result!.Plate);
+        Assert.Equal(3, result.FrameHits);
+        Assert.Equal(2, result.AgreeingFrameHits);
+    }
+
+    /// <summary>
+    /// Вывеска «АВАРИЙНАЯ» на борту: детекция в каждом кадре, но текст каждый
+    /// раз другой. Число кадров трека тут ни о чём не говорит — важно, что ни
+    /// одно чтение не повторилось.
+    /// </summary>
+    [Fact]
+    public void Vote_ReportsSingleAgreeingFrameForJunkReadings()
+    {
+        var result = PlateVote.Vote(new[]
+        {
+            Read("А835НМ69", 38.4, prob: 0.62),
+            Read("А839НМ69", 38.4, prob: 0.60),
+            Read("А840НМ69", 38.6, prob: 0.64),
+            Read("А849НМ69", 38.6, prob: 0.63)
+        });
+
+        Assert.Equal(2, result!.FrameHits);
+        Assert.Equal(1, result.AgreeingFrameHits);
+    }
 }
 
 public class PlateTrackerTests
@@ -169,6 +208,22 @@ public class PlateTrackerTests
         tracker.Add(Det("В713ВВ125", 1.66, new[] { 930, 600, 1000, 625 }));
 
         Assert.Equal(1.33, tracker.Tracks[0].Best.TimeSec);
+    }
+
+    /// <summary>
+    /// У края кадра встречная машина за кадр проходит три своих ширины.
+    /// Раньше трек здесь рвался, и один проезд давал две записи в БД.
+    /// </summary>
+    [Fact]
+    public void Add_KeepsOneTrackWhenSameTextJumpsNearFrameEdge()
+    {
+        var tracker = new PlateTracker();
+        tracker.Add(Det("Х034ХА125", 20.8, new[] { 1515, 501, 1584, 519 }));
+        tracker.Add(Det("Х034ХА125", 21.0, new[] { 1662, 527, 1728, 551 }));
+        tracker.Add(Det("Х034ХА125", 21.2, new[] { 1866, 567, 1920, 603 }));
+
+        Assert.Single(tracker.Tracks);
+        Assert.Equal(3, tracker.Tracks[0].FrameHits);
     }
 
     /// <summary>Без bbox (живая камера) остаётся текстовая привязка в окне времени.</summary>

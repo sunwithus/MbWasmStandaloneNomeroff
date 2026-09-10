@@ -22,7 +22,15 @@
 
   <!-- Артефакты бывших отдельных API — в output хоста -->
   <ItemGroup>
-    <None Include="..\Nomeroff.Video.Api\ffmpeg.exe" Link="ffmpeg.exe" Condition="Exists('..\Nomeroff.Video.Api\ffmpeg.exe')">
+    <None Include="..\..\ffmpeg.exe" Link="ffmpeg.exe" Condition="Exists('..\..\ffmpeg.exe')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <None Include="..\..\ffprobe.exe" Link="ffprobe.exe" Condition="Exists('..\..\ffprobe.exe')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <None Include="..\Nomeroff.Video.Api\ffmpeg.exe" Link="ffmpeg.exe" Condition="!Exists('..\..\ffmpeg.exe') And Exists('..\Nomeroff.Video.Api\ffmpeg.exe')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>

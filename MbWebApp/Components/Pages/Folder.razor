@@ -27,7 +27,7 @@
             </MudRadioGroup>
         </MudStack>
         <MudStack Row="true" Spacing="2">
-            @if (!_status.Running)
+            @if (!_status.Running && !_status.Processing)
             {
                 <MudButton Variant="Variant.Outlined" Color="Color.Default" StartIcon="@Icons.Material.Filled.Save" OnClick="SaveSettingsAsync" Disabled="@_busy">
                     Сохранить настройки
@@ -41,8 +41,9 @@
             }
             else
             {
-                <MudButton Variant="Variant.Filled" Color="Color.Error" StartIcon="@Icons.Material.Filled.Stop" OnClick="StopAsync">
-                    Стоп
+                <MudButton Variant="Variant.Filled" Color="Color.Error" StartIcon="@Icons.Material.Filled.Stop"
+                           OnClick="StopAsync" Disabled="@(_status.Stopping)">
+                    @(_status.Stopping ? "Останавливается..." : "Стоп")
                 </MudButton>
             }
         </MudStack>

@@ -140,9 +140,104 @@ public sealed class FolderDiskQueue
     {
         var root = ResolveRoot(cfg);
         var jobPath = Path.Combine(JobsDir(root), job.Id + ".json");
+        // AfterAction должен был унести видео. Если оно ещё в queue и уже есть
+        // копия в Processed — удаляем хвост. Если это единственная копия —
+        // job оставляем, чтобы Sweep не счёл файл сиротой.
+        TryDeleteStoredIfMoved(cfg, job);
+        if (File.Exists(job.StoredPath))
+        {
+            _logger.LogWarning(
+                "Disk-queue: {Id} завершён, но файл остался — job не удаляю, чтобы не потерять ролик",
+                job.Id);
+            return;
+        }
         try { if (File.Exists(jobPath)) File.Delete(jobPath); } catch { /* ignore */ }
-        // файл уже уйдёт через AfterAction
         _logger.LogInformation("Disk-queue: completed job {Id}", job.Id);
+    }
+
+    /// <summary>
+    /// Убрать мёртвые job-файлы (видео уже нет) и сиротские ролики без job.
+    /// Не удаляет файл, который сейчас обрабатывается.
+    /// </summary>
+    public void Sweep(FolderWatchConfig cfg, string? keepStoredPath = null)
+    {
+        try
+        {
+            EnsureLayout(cfg);
+            var root = ResolveRoot(cfg);
+            var knownFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in Directory.EnumerateFiles(JobsDir(root), "*.json"))
+            {
+                FolderDiskQueueJob? job = null;
+                try
+                {
+                    job = JsonSerializer.Deserialize<FolderDiskQueueJob>(File.ReadAllText(file), JsonOpts);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Disk-queue: битый job {File} — удаляю", file);
+                    try { File.Delete(file); } catch { /* ignore */ }
+                    continue;
+                }
+
+                if (job == null || string.IsNullOrWhiteSpace(job.StoredPath) || !File.Exists(job.StoredPath))
+                {
+                    try { File.Delete(file); } catch { /* ignore */ }
+                    continue;
+                }
+                knownFiles.Add(Path.GetFullPath(job.StoredPath));
+            }
+
+            foreach (var leftover in Directory.EnumerateFiles(FilesDir(root)))
+            {
+                var full = Path.GetFullPath(leftover);
+                if (keepStoredPath != null
+                    && string.Equals(full, Path.GetFullPath(keepStoredPath), StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (knownFiles.Contains(full))
+                    continue;
+                // Job уже нет — возвращаем ролик в папку мониторинга, не удаляем.
+                try
+                {
+                    var destDir = Path.GetFullPath(cfg.WatchFolder);
+                    var dest = Path.Combine(destDir, Path.GetFileName(full));
+                    if (File.Exists(dest))
+                    {
+                        var name = Path.GetFileNameWithoutExtension(full);
+                        var ext = Path.GetExtension(full);
+                        dest = Path.Combine(destDir, $"{name}_{DateTime.Now:yyyyMMdd_HHmmss}{ext}");
+                    }
+                    File.Move(full, dest);
+                    _logger.LogInformation("Disk-queue: сирота {File} → {Dest}", Path.GetFileName(full), dest);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Disk-queue: не удалось вернуть {File}", full);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Disk-queue sweep failed");
+        }
+    }
+
+    private void TryDeleteStoredIfMoved(FolderWatchConfig cfg, FolderDiskQueueJob job)
+    {
+        if (string.IsNullOrWhiteSpace(job.StoredPath) || !File.Exists(job.StoredPath))
+            return;
+        try
+        {
+            var originalName = Path.GetFileName(
+                string.IsNullOrWhiteSpace(job.OriginalPath) ? job.StoredPath : job.OriginalPath);
+            var dest = Path.Combine(Path.GetFullPath(cfg.WatchFolder), cfg.MoveSubfolder, originalName);
+            if (File.Exists(dest))
+                File.Delete(job.StoredPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Disk-queue: leftover {Path}", job.StoredPath);
+        }
     }
 
     public int Count(FolderWatchConfig cfg)

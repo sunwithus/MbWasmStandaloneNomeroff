@@ -25,6 +25,7 @@ public sealed class FolderWatchService : BackgroundService
     };
 
     private int _drainAndStop;
+    private CancellationTokenSource? _runCts;
 
     public FolderWatchService(
         FolderWatchState state,
@@ -53,6 +54,7 @@ public sealed class FolderWatchService : BackgroundService
     public void RequestScanOnce()
     {
         Interlocked.Exchange(ref _drainAndStop, 1);
+        ReplaceRunCts();
         ScanFolder(_state.GetConfig());
         _state.SetRunning(true);
         _wake.Set();
@@ -61,6 +63,7 @@ public sealed class FolderWatchService : BackgroundService
     public void RequestStart()
     {
         Interlocked.Exchange(ref _drainAndStop, 0);
+        ReplaceRunCts();
         var cfg = _state.GetConfig();
         cfg.Enabled = true;
         _state.SaveConfig(cfg);
@@ -75,8 +78,18 @@ public sealed class FolderWatchService : BackgroundService
         var cfg = _state.GetConfig();
         cfg.Enabled = false;
         _state.SaveConfig(cfg);
-        _state.SetRunning(false);
+        _state.SetStopping();
+        _state.ClearQueue();
         DisposeWatcher();
+        try { _runCts?.Cancel(); } catch { /* ignore */ }
+        _wake.Set();
+    }
+
+    private void ReplaceRunCts()
+    {
+        var next = new CancellationTokenSource();
+        var prev = Interlocked.Exchange(ref _runCts, next);
+        prev?.Dispose();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -94,7 +107,7 @@ public sealed class FolderWatchService : BackgroundService
             try
             {
                 cfg = _state.GetConfig();
-                if (_state.Running)
+                if (_state.Running && !_state.Stopping)
                 {
                     EnsureWatcher(cfg);
                     ScanFolder(cfg);
@@ -175,9 +188,19 @@ public sealed class FolderWatchService : BackgroundService
         CancellationToken ct,
         FolderDiskQueueJob? fromDiskQueue)
     {
-        if (!await WaitUntilStableAsync(path, cfg.StableSeconds, ct))
+        using var linkedWait = CancellationTokenSource.CreateLinkedTokenSource(
+            ct, _runCts?.Token ?? CancellationToken.None);
+        try
         {
-            _state.EndProcessingError(path, "Файл не стабилизировался (ещё пишется?)");
+            if (!await WaitUntilStableAsync(path, cfg.StableSeconds, linkedWait.Token))
+            {
+                _state.EndProcessingError(path, "Файл не стабилизировался (ещё пишется?)");
+                return;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _state.EndProcessingError(path, "остановлено");
             return;
         }
 
@@ -201,10 +224,18 @@ public sealed class FolderWatchService : BackgroundService
         _state.BeginProcessing(path);
         ProcessVideoResponse? apiResponse = null;
         string? error = null;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            ct, _runCts?.Token ?? CancellationToken.None);
 
         try
         {
-            var options = new VideoProcessOptions { SampleFps = ResolveSampleFps(cfg) };
+            linked.Token.ThrowIfCancellationRequested();
+            var options = new VideoProcessOptions
+            {
+                SampleFps = ResolveSampleFps(cfg),
+                // disk-queue хранит файл как {guid}.mp4 — дату съёмки берём из исходного имени
+                OriginalFileName = fromDiskQueue?.OriginalPath ?? path
+            };
             await _processor.ProcessAsync(path, options, async (payload, token) =>
             {
                 // Типизированная ветка первой: сериализовать результат целиком,
@@ -240,7 +271,9 @@ public sealed class FolderWatchService : BackgroundService
                 }
 
                 await Task.CompletedTask;
-            }, ct);
+            }, linked.Token);
+
+            linked.Token.ThrowIfCancellationRequested();
 
             if (error != null)
             {
@@ -267,7 +300,7 @@ public sealed class FolderWatchService : BackgroundService
                 MinFrameHits = _config.GetValue("PlateMinFrameHits", 2),
                 Progress = new Progress<(int current, int total, string message)>(p =>
                     _state.ReportProgress(p.message, (int)(100.0 * p.current / Math.Max(p.total, 1)), p.current, p.total))
-            }, ct);
+            }, linked.Token);
 
             if (cfg.SaveToDb && outcome.Summary.SaveAttempts > 0 && outcome.Summary.SaveFailures == outcome.Summary.SaveAttempts)
             {
@@ -278,11 +311,16 @@ public sealed class FolderWatchService : BackgroundService
             ApplyAfterAction(path, cfg, preferredName: fromDiskQueue?.OriginalPath);
             if (fromDiskQueue != null)
                 _diskQueue.Complete(cfg, fromDiskQueue);
+            _diskQueue.Sweep(cfg);
 
             var summary =
                 $"кадров {outcome.Summary.TotalFrames}, номеров {outcome.Hits.Count}, уникальных {outcome.Summary.UniquePlates}" +
                 (cfg.SaveToDb ? $", в БД с GPS {outcome.Summary.SavedWithGps}" : "");
             _state.EndProcessingSuccess(path, summary);
+        }
+        catch (OperationCanceledException)
+        {
+            _state.EndProcessingError(path, "остановлено");
         }
         catch (Exception ex)
         {
@@ -336,7 +374,7 @@ public sealed class FolderWatchService : BackgroundService
     {
         try
         {
-            var baseUrl = (_config["NomeroffApiBaseUrl"] ?? "http://127.0.0.1:8000").TrimEnd('/');
+            var baseUrl = MbWebApp.Options.AppPorts.OcrBaseUrl(_config).TrimEnd('/');
             var client = _httpFactory.CreateClient();
             client.Timeout = TimeSpan.FromSeconds(5);
             using var resp = await client.GetAsync($"{baseUrl}/health", ct);
@@ -416,6 +454,7 @@ public sealed class FolderWatchService : BackgroundService
                     return;
 
                 _diskQueue.EnsureLayout(cfg);
+                _diskQueue.Sweep(cfg);
 
                 foreach (var file in Directory.EnumerateFiles(cfg.WatchFolder))
                 {
@@ -531,6 +570,7 @@ public sealed class FolderWatchService : BackgroundService
     public override void Dispose()
     {
         DisposeWatcher();
+        _runCts?.Dispose();
         _wake.Dispose();
         base.Dispose();
     }

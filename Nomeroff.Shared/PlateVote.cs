@@ -18,6 +18,14 @@ public sealed class PlateVoteResult
     public double Confidence { get; init; }
     /// <summary>В скольких разных кадрах номер был встречен.</summary>
     public int FrameHits { get; init; }
+    /// <summary>
+    /// В скольких разных кадрах прочитан ровно этот текст.
+    ///
+    /// Отличать от FrameHits важно для мусора: табличка «АВАРИЙНАЯ» на борту
+    /// даёт по чтению в каждом кадре, но каждый раз другое (А835НМ69, А840НМ69,
+    /// А849НМ69), тогда как настоящий номер повторяется символ в символ.
+    /// </summary>
+    public int AgreeingFrameHits { get; init; }
 }
 
 /// <summary>
@@ -76,11 +84,18 @@ public static class PlateVote
         }
 
         var frameHits = group.Select(r => Math.Round(r.TimeSec, 2)).Distinct().Count();
+        var voted = new string(chars);
+        var agreeing = group
+            .Where(r => string.Equals(r.Plate, voted, StringComparison.Ordinal))
+            .Select(r => Math.Round(r.TimeSec, 2))
+            .Distinct()
+            .Count();
         return new PlateVoteResult
         {
-            Plate = new string(chars),
+            Plate = voted,
             Confidence = confidences.Average(),
-            FrameHits = frameHits
+            FrameHits = frameHits,
+            AgreeingFrameHits = agreeing
         };
     }
 }

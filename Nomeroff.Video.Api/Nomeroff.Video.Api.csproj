@@ -14,7 +14,15 @@
     <ProjectReference Include="..\Nomeroff.Shared\Nomeroff.Shared.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <None Update="ffmpeg.exe">
+    <None Include="..\..\ffmpeg.exe" Link="ffmpeg.exe" Condition="Exists('..\..\ffmpeg.exe')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <None Include="..\..\ffprobe.exe" Link="ffprobe.exe" Condition="Exists('..\..\ffprobe.exe')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <None Update="ffmpeg.exe" Condition="!Exists('..\..\ffmpeg.exe')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>

@@ -62,6 +62,26 @@ public static class VideoTimestamps
         }
     }
 
+    /// <summary>
+    /// Имя для временной копии загруженного файла.
+    ///
+    /// Загрузка через браузер раньше складывала ролик как «video.mp4», и метка
+    /// времени из имени регистратора терялась — в БД уходило время обработки.
+    /// Имя из запроса при этом нельзя брать как есть: в нём может приехать путь.
+    /// </summary>
+    public static string SafeTempFileName(string? fileName, string fallback = "video.mp4")
+    {
+        var name = Path.GetFileName(fileName ?? "");
+        foreach (var c in Path.GetInvalidFileNameChars())
+            name = name.Replace(c, '_');
+        name = name.Trim();
+        if (string.IsNullOrEmpty(name) || name is "." or "..")
+            return fallback;
+        if (string.IsNullOrEmpty(Path.GetExtension(name)))
+            name += Path.GetExtension(fallback);
+        return name.Length > 150 ? name[^150..] : name;
+    }
+
     /// <summary>creation_time из контейнера (ffprobe). Возвращается в UTC.</summary>
     public static async Task<DateTime?> TryProbeCreationTimeAsync(
         string ffprobePath,
@@ -127,13 +147,21 @@ public static class VideoTimestamps
     }
 
     /// <summary>Итоговое начало записи в UTC + откуда оно взято.</summary>
+    /// <param name="nameHint">
+    /// Исходное имя регистратора, если на диске файл лежит под другим именем
+    /// (загрузка, disk-queue с GUID). Без подсказки остаётся только дата файла.
+    /// </param>
     public static async Task<(DateTime StartUtc, VideoStartSource Source)> ResolveStartUtcAsync(
         string videoPath,
         string ffprobePath,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? nameHint = null)
     {
-        if (TryParseFromFileName(videoPath) is { } fromName)
-            return (fromName.ToUniversalTime(), VideoStartSource.FileName);
+        foreach (var candidate in new[] { nameHint, videoPath })
+        {
+            if (TryParseFromFileName(candidate) is { } fromName)
+                return (fromName.ToUniversalTime(), VideoStartSource.FileName);
+        }
 
         if (await TryProbeCreationTimeAsync(ffprobePath, videoPath, ct) is { } fromProbe)
             return (fromProbe, VideoStartSource.ProbeCreationTime);

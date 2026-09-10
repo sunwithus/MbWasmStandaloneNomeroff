@@ -41,6 +41,7 @@ public sealed class FolderWatchLogEntry
 public sealed class FolderWatchStatusDto
 {
     public bool Running { get; set; }
+    public bool Stopping { get; set; }
     public bool Processing { get; set; }
     public string? CurrentFile { get; set; }
     public string Message { get; set; } = "";
@@ -79,6 +80,7 @@ public sealed class FolderWatchState
     public event Action? Changed;
 
     public bool Running { get; private set; }
+    public bool Stopping { get; private set; }
     public bool Processing { get; private set; }
     public string? CurrentFile { get; private set; }
     public string Message { get; private set; } = "Остановлено";
@@ -118,12 +120,42 @@ public sealed class FolderWatchState
         lock (_lock)
         {
             Running = running;
+            if (running)
+                Stopping = false;
             Message = running ? "Мониторинг включён" : "Остановлено";
             if (!running && !Processing)
+            {
+                Stopping = false;
+                CurrentFile = null;
+                Percent = 0;
+            }
+        }
+        Notify();
+    }
+
+    /// <summary>Стоп: не брать новые файлы; текущий прогон отменяет сервис.</summary>
+    public void SetStopping()
+    {
+        lock (_lock)
+        {
+            Running = false;
+            Stopping = Processing;
+            Message = Processing ? "Остановка текущего файла..." : "Остановлено";
+            if (!Processing)
             {
                 CurrentFile = null;
                 Percent = 0;
             }
+        }
+        Notify();
+    }
+
+    public void ClearQueue()
+    {
+        lock (_lock)
+        {
+            _queue.Clear();
+            _queued.Clear();
         }
         Notify();
     }
@@ -196,6 +228,7 @@ public sealed class FolderWatchState
         lock (_lock)
         {
             Processing = false;
+            Stopping = false;
             LastResultSummary = summary;
             AddLogLocked("ok", $"{Path.GetFileName(path)}: {summary}");
             CurrentFile = null;
@@ -210,6 +243,7 @@ public sealed class FolderWatchState
         lock (_lock)
         {
             Processing = false;
+            Stopping = false;
             AddLogLocked("error", $"{Path.GetFileName(path)}: {error}");
             CurrentFile = null;
             Percent = 0;
@@ -225,6 +259,7 @@ public sealed class FolderWatchState
             return new FolderWatchStatusDto
             {
                 Running = Running,
+                Stopping = Stopping,
                 Processing = Processing,
                 CurrentFile = CurrentFile,
                 Message = Message,

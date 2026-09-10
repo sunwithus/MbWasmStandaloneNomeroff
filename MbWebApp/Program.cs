@@ -1,5 +1,6 @@
 using System.Text;
 using MbWebApp.Components;
+using MbWebApp.Options;
 using MbWebApp.Services;
 using Microsoft.AspNetCore.Http.Features;
 using MudBlazor.Services;
@@ -10,6 +11,13 @@ using Nomeroff.Video.Api;
 Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+{
+    ["NomeroffApiBaseUrl"] = AppPorts.OcrBaseUrl(builder.Configuration),
+    ["Urls"] = AppPorts.AppListenUrl(builder.Configuration),
+    ["AppBaseUrl"] = AppPorts.AppBaseUrl(builder.Configuration)
+});
 
 builder.Logging.SetMinimumLevel(LogLevel.Debug);
 builder.Logging.AddFilter("Microsoft", LogLevel.Warning);
@@ -36,7 +44,7 @@ builder.Services.Configure<MbWebApp.Options.NomeroffAppOptions>(o =>
 {
     o.MaxVideoFrames = builder.Configuration.GetValue("MaxVideoFrames", 300);
     o.PlateMinConfidence = builder.Configuration.GetValue("PlateMinConfidence", 0.60);
-    o.NomeroffApiBaseUrl = builder.Configuration["NomeroffApiBaseUrl"] ?? "http://127.0.0.1:8000";
+    o.NomeroffApiBaseUrl = AppPorts.OcrBaseUrl(builder.Configuration);
     o.MaxVideoUploadBytes = builder.Configuration.GetValue("MaxVideoUploadBytes", 1024L * 1024 * 1024);
 });
 builder.Services.Configure<MbWebApp.Options.FolderWatchOptions>(
@@ -70,10 +78,7 @@ builder.WebHost.ConfigureKestrel(o =>
     o.Limits.MaxRequestBodySize = builder.Configuration.GetValue<long>("MaxVideoUploadBytes", 1024L * 1024 * 1024);
 });
 
-var urls = builder.Configuration["Urls"]
-           ?? builder.Configuration["Kestrel:Endpoints:Http:Url"]
-           ?? "http://0.0.0.0:5555";
-builder.WebHost.UseUrls(urls);
+builder.WebHost.UseUrls(AppPorts.AppListenUrl(builder.Configuration));
 
 var app = builder.Build();
 
@@ -94,7 +99,7 @@ app.MapGet("/health", (IConfiguration config) => Results.Ok(new
 {
     status = "ok",
     modules = new[] { "ui", "gps", "interbase", "video" },
-    pythonHint = config["NomeroffApiBaseUrl"] ?? "http://127.0.0.1:8000",
+    pythonHint = AppPorts.OcrBaseUrl(config),
     maxVideoFrames = config.GetValue("MaxVideoFrames", 300),
     plateMinConfidence = config.GetValue("PlateMinConfidence", 0.60)
 }));
