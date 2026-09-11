@@ -43,7 +43,7 @@
         <MudPaper Class="pa-4 soft-card mb-4" Outlined="true" Elevation="0">
             <MudStack Spacing="2">
                 <MudText Typo="Typo.subtitle1">Распознавание OCR</MudText>
-                <MudChip T="string" Color="@(_ocrOk ? Color.Success : Color.Warning)" Size="Size.Small">@(_ocrOk ? "модель готова" : "недоступно")</MudChip>
+                <MudChip T="string" Color="@(_ocrOk ? Color.Success : Color.Warning)" Size="Size.Small">@OcrChipText</MudChip>
                 <MudText Typo="Typo.caption" Style="word-break:break-all;">URL: @_ocrUrl</MudText>
                 <MudText Typo="Typo.caption">@_ocrDetail</MudText>
                 <MudButton Variant="Variant.Text" Size="Size.Small" Href="/swagger" Target="_blank">Swagger API</MudButton>
@@ -74,6 +74,8 @@
     private string _ocrDetail = "…";
     private string _gpsDetail = "…";
     private string _ibDetail = "…";
+    private string OcrChipText => !_ocrOk ? "недоступно" : _ocrOnCuda ? "модель на GPU" : "модель на CPU";
+    private bool _ocrOnCuda;
 
     protected override async Task OnInitializedAsync() => await RefreshAsync(showSnack: false);
 
@@ -97,7 +99,7 @@
             using var http = new HttpClient { BaseAddress = new Uri(Nav.BaseUri), Timeout = TimeSpan.FromSeconds(5) };
             using var doc = JsonDocument.Parse(await http.GetStringAsync("health"));
             _appOk = true;
-            _appDetail = doc.RootElement.ToString();
+            _appDetail = FormatAppHealth(doc.RootElement);
         }
         catch (Exception ex)
         {
@@ -109,9 +111,10 @@
         {
             var status = await Nomeroff.HealthAsync();
             _ocrOk = status?.ModelLoaded == true;
+            _ocrOnCuda = status?.IsCuda == true;
             _ocrDetail = status == null
                 ? $"нет ответа от {_ocrUrl}/health — запущен ли start-app / OCR :8000?"
-                : $"{status.Status}, model_loaded={status.ModelLoaded}";
+                : FormatOcrHealth(status);
         }
         catch (Exception ex)
         {
@@ -142,5 +145,38 @@
         var (ocr, app, video) = Settings.GetDefaultServiceUrls();
         Snackbar.Add($"Адреса сброшены: OCR {ocr}, App/Video {app} (video={video})", Severity.Success);
         await RefreshAsync(showSnack: false);
+    }
+
+    private static string FormatAppHealth(JsonElement root)
+    {
+        var parts = new List<string> { "онлайн" };
+        if (root.TryGetProperty("compute", out var compute)
+            && compute.TryGetProperty("inference", out var inf))
+        {
+            var device = inf.GetString() ?? "?";
+            var name = compute.TryGetProperty("inferenceDevice", out var n) ? n.GetString() : null;
+            parts.Add(string.IsNullOrWhiteSpace(name) ? $"сети: {device}" : $"сети: {device} ({name})");
+            if (compute.TryGetProperty("preprocess", out var prep))
+                parts.Add($"подготовка кадров: {prep.GetString()}");
+        }
+        if (root.TryGetProperty("gpu", out var gpu)
+            && gpu.TryGetProperty("vramUsedMb", out var used)
+            && used.ValueKind is JsonValueKind.Number
+            && gpu.TryGetProperty("vramTotalMb", out var total)
+            && total.ValueKind is JsonValueKind.Number)
+        {
+            parts.Add($"VRAM {used.GetDouble():0} / {total.GetDouble():0} МБ");
+        }
+        return string.Join(" · ", parts);
+    }
+
+    private static string FormatOcrHealth(HealthResponse status)
+    {
+        var where = status.IsCuda ? "GPU" : (status.Device ?? "cpu").ToUpperInvariant();
+        var name = string.IsNullOrWhiteSpace(status.DeviceName) ? "" : $", {status.DeviceName}";
+        var vram = status.VramUsedMb is > 0 && status.VramTotalMb is > 0
+            ? $", VRAM {status.VramUsedMb:0}/{status.VramTotalMb:0} МБ"
+            : "";
+        return $"{status.Status}, модель на {where}{name}{vram}";
     }
 }

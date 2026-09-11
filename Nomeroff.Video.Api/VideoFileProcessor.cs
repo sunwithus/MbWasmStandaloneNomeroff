@@ -1,6 +1,9 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Net;
+using System.Net.Http.Headers;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.Extensions.Configuration;
@@ -36,10 +39,17 @@ public sealed class VideoProcessOptions
 /// </summary>
 public sealed class VideoFileProcessor
 {
+    private static readonly JsonSerializerOptions FrameMetaJson = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+    };
+
     private readonly IHttpClientFactory _httpFactory;
     private readonly GpsOverlayOcr _gpsOcr;
     private readonly IConfiguration _config;
     private readonly ILogger<VideoFileProcessor> _logger;
+    // Старый OCR без /process_frames_raw: один 404 — дальше только JSON.
+    private bool _rawFramesSupported = true;
 
     public VideoFileProcessor(
         IHttpClientFactory httpFactory,
@@ -445,6 +455,114 @@ public sealed class VideoFileProcessor
         var variants = (_config["PlateVariants"] ?? "full,crop,roi,roi_contrast")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
+        HttpResponseMessage? response;
+        try
+        {
+            response = await PostFramesAsync(
+                http, frames, variants, minOcrConfidence, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "process_frames недоступен");
+            return empty;
+        }
+
+        if (response == null)
+            return empty;
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("process_frames HTTP {Status}", response.StatusCode);
+                return empty;
+            }
+
+            var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: ct);
+            if (!json.TryGetProperty("frames", out var framesEl) || framesEl.ValueKind != JsonValueKind.Array)
+                return empty;
+
+            var result = new List<List<VideoPlateEmit>>(frames.Count);
+            foreach (var frameEl in framesEl.EnumerateArray())
+            {
+                var plates = new List<VideoPlateEmit>();
+                if (frameEl.TryGetProperty("plates", out var platesEl)
+                    && platesEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var p in platesEl.EnumerateArray())
+                    {
+                        var emit = ReadPlate(p, minOcrConfidence, minDetConfidence);
+                        if (emit != null)
+                            plates.Add(emit);
+                    }
+                }
+                result.Add(plates);
+            }
+            while (result.Count < frames.Count)
+                result.Add(new List<VideoPlateEmit>());
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Сначала сырые JPEG (без base64). Нет маршрута — JSON, как раньше.
+    /// </summary>
+    private async Task<HttpResponseMessage?> PostFramesAsync(
+        HttpClient http,
+        List<RawFrame> frames,
+        string[] variants,
+        double minOcrConfidence,
+        CancellationToken ct)
+    {
+        if (_rawFramesSupported)
+        {
+            var raw = await TryPostFramesRawAsync(http, frames, variants, minOcrConfidence, ct);
+            if (raw != null)
+                return raw;
+            _rawFramesSupported = false;
+        }
+        return await PostFramesJsonAsync(http, frames, variants, minOcrConfidence, ct);
+    }
+
+    private async Task<HttpResponseMessage?> TryPostFramesRawAsync(
+        HttpClient http,
+        List<RawFrame> frames,
+        string[] variants,
+        double minOcrConfidence,
+        CancellationToken ct)
+    {
+        using var content = new MultipartFormDataContent();
+        var meta = JsonSerializer.Serialize(new
+        {
+            variants,
+            times_sec = frames.Select(f => f.TimeSec).ToArray(),
+            min_ocr_confidence = minOcrConfidence,
+            include_crop = true,
+            min_frame_hits = 1
+        }, FrameMetaJson);
+        content.Add(new StringContent(meta, Encoding.UTF8), "meta");
+        for (var i = 0; i < frames.Count; i++)
+        {
+            var part = new ByteArrayContent(frames[i].Jpeg);
+            part.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
+            content.Add(part, "files", $"{i}.jpg");
+        }
+
+        var resp = await http.PostAsync("api/process_frames_raw", content, ct);
+        if (resp.StatusCode != HttpStatusCode.NotFound)
+            return resp;
+
+        resp.Dispose();
+        _logger.LogInformation("process_frames_raw нет на OCR — дальше JSON/base64");
+        return null;
+    }
+
+    private static Task<HttpResponseMessage> PostFramesJsonAsync(
+        HttpClient http,
+        List<RawFrame> frames,
+        string[] variants,
+        double minOcrConfidence,
+        CancellationToken ct)
+    {
         var body = new
         {
             frames = frames.Select(f => new
@@ -455,51 +573,10 @@ public sealed class VideoFileProcessor
             variants,
             min_ocr_confidence = minOcrConfidence,
             include_crop = true,
-            // Консенсус считаем в C# по всему ролику, а не по одному батчу:
-            // машина может попасть на границу двух батчей.
+            // Консенсус считаем в C# по всему ролику, а не по одному батчу.
             min_frame_hits = 1
         };
-
-        HttpResponseMessage response;
-        try
-        {
-            response = await http.PostAsJsonAsync("api/process_frames", body, ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogError(ex, "process_frames недоступен");
-            return empty;
-        }
-
-        if (!response.IsSuccessStatusCode)
-        {
-            _logger.LogWarning("process_frames HTTP {Status}", response.StatusCode);
-            return empty;
-        }
-
-        var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: ct);
-        if (!json.TryGetProperty("frames", out var framesEl) || framesEl.ValueKind != JsonValueKind.Array)
-            return empty;
-
-        var result = new List<List<VideoPlateEmit>>(frames.Count);
-        foreach (var frameEl in framesEl.EnumerateArray())
-        {
-            var plates = new List<VideoPlateEmit>();
-            if (frameEl.TryGetProperty("plates", out var platesEl)
-                && platesEl.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var p in platesEl.EnumerateArray())
-                {
-                    var emit = ReadPlate(p, minOcrConfidence, minDetConfidence);
-                    if (emit != null)
-                        plates.Add(emit);
-                }
-            }
-            result.Add(plates);
-        }
-        while (result.Count < frames.Count)
-            result.Add(new List<VideoPlateEmit>());
-        return result;
+        return http.PostAsJsonAsync("api/process_frames", body, ct);
     }
 
     private static VideoPlateEmit? ReadPlate(JsonElement item, double minOcrConfidence, double minDetConfidence)

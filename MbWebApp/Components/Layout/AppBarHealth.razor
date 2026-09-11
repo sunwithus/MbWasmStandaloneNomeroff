@@ -13,14 +13,16 @@
              Color="@(_ocrOk ? Color.Success : Color.Warning)"
              Class="appbar-health-chip"
              OnClick="@(() => Nav.NavigateTo("/status"))">
-        OCR @(_ocrOk ? "OK" : "—")
+        OCR @OcrChip
     </MudChip>
 </div>
 
 @code {
     private bool _appOk;
     private bool _ocrOk;
+    private bool _ocrCuda;
     private bool _painted;
+    private string OcrChip => !_ocrOk ? "—" : _ocrCuda ? "GPU" : "CPU";
     private CancellationTokenSource? _cts;
     private Task? _loop;
 
@@ -48,6 +50,7 @@
     {
         var appOk = false;
         var ocrOk = false;
+        var ocrCuda = false;
         try
         {
             using var http = new HttpClient { BaseAddress = new Uri(Nav.BaseUri), Timeout = TimeSpan.FromSeconds(3) };
@@ -60,13 +63,15 @@
         {
             var status = await Nomeroff.HealthAsync(ct);
             ocrOk = status?.ModelLoaded == true;
+            ocrCuda = status?.IsCuda == true;
         }
         catch { /* offline */ }
 
-        if (appOk != _appOk || ocrOk != _ocrOk || !_painted)
+        if (appOk != _appOk || ocrOk != _ocrOk || ocrCuda != _ocrCuda || !_painted)
         {
             _appOk = appOk;
             _ocrOk = ocrOk;
+            _ocrCuda = ocrCuda;
             _painted = true;
             await InvokeAsync(StateHasChanged);
         }

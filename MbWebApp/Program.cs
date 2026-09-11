@@ -2,6 +2,7 @@ using System.Text;
 using MbWebApp.Components;
 using MbWebApp.Options;
 using MbWebApp.Services;
+using MbWebApp;
 using Microsoft.AspNetCore.Http.Features;
 using MudBlazor.Services;
 using Nomeroff.Gps.Api;
@@ -95,14 +96,7 @@ app.UseSwaggerUI(c =>
     c.SwaggerEndpoint("/swagger/v1/swagger.json", "MbWebApp API");
 });
 
-app.MapGet("/health", (IConfiguration config) => Results.Ok(new
-{
-    status = "ok",
-    modules = new[] { "ui", "gps", "interbase", "video" },
-    pythonHint = AppPorts.OcrBaseUrl(config),
-    maxVideoFrames = config.GetValue("MaxVideoFrames", 300),
-    plateMinConfidence = config.GetValue("PlateMinConfidence", 0.60)
-}));
+app.MapAppHealth();
 
 // Полный конвейер без записи в БД: кадры -> треки -> голосование -> итоговые
 // номера. Нужен регрессионному стенду и разбору жалоб «почему этого номера нет»:

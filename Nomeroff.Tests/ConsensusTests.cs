@@ -120,12 +120,14 @@ public class PlateVoteTests
 
 public class PlateTrackerTests
 {
-    private static TrackDetection Det(string plate, double timeSec, int[]? bbox, int area = 0) => new()
+    private static TrackDetection Det(
+        string plate, double timeSec, int[]? bbox, int area = 0, string? crop = null) => new()
     {
         Plate = plate,
         TimeSec = timeSec,
         Bbox = bbox,
-        BboxArea = area != 0 ? area : Area(bbox)
+        BboxArea = area != 0 ? area : Area(bbox),
+        PlateImageBase64 = crop
     };
 
     private static int Area(int[]? b) =>
@@ -186,6 +188,33 @@ public class PlateTrackerTests
         tracker.Add(Det("Х034ХА125", 1.0, new[] { 1400, 610, 1520, 645 }));
 
         Assert.Equal(2, tracker.Tracks.Count);
+    }
+
+    /// <summary>
+    /// Плотный поток: номера соседних машин в одном кадре через 2–3 своих ширины.
+    /// Раньше nearby-склейка без IoU делала один трек — в БД номер одной машины
+    /// и кроп более крупной соседней (id=34: Р521ТС55 + фото В906РХ125).
+    /// </summary>
+    [Fact]
+    public void Add_SplitsAdjacentCarsInSameTrafficLane()
+    {
+        var tracker = new PlateTracker();
+        tracker.Add(Det("Р521ТС55", 1.0, new[] { 700, 620, 780, 645 }));
+        tracker.Add(Det("В906РХ125", 1.0, new[] { 880, 610, 970, 640 }));
+
+        Assert.Equal(2, tracker.Tracks.Count);
+    }
+
+    [Fact]
+    public void BestForPlate_DoesNotTakeNeighborCrop()
+    {
+        var track = new PlateTrack { Id = 1 };
+        track.Detections.Add(Det("Р521ТС55", 1.0, new[] { 700, 620, 780, 645 }, area: 2000, crop: "crop-521"));
+        track.Detections.Add(Det("В906РХ125", 1.0, new[] { 880, 610, 1100, 680 }, area: 9000, crop: "crop-906"));
+
+        Assert.Equal("crop-521", track.BestForPlate("Р521ТС55")?.PlateImageBase64);
+        Assert.Equal("crop-906", track.BestForPlate("В906РХ125")?.PlateImageBase64);
+        Assert.Null(track.BestForPlate("А000АА00"));
     }
 
     [Fact]

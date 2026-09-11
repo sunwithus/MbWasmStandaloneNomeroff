@@ -10,8 +10,30 @@ public class HealthResponse
     public bool ModelLoaded { get; set; }
     [JsonPropertyName("gpu_available")]
     public bool GpuAvailable { get; set; }
+    [JsonPropertyName("device")]
+    public string? Device { get; set; }
+    [JsonPropertyName("device_name")]
+    public string? DeviceName { get; set; }
+    [JsonPropertyName("device_policy")]
+    public string? DevicePolicy { get; set; }
+    [JsonPropertyName("inference")]
+    public string? Inference { get; set; }
+    [JsonPropertyName("preprocess")]
+    public string? Preprocess { get; set; }
+    [JsonPropertyName("vram_used_mb")]
+    public double? VramUsedMb { get; set; }
+    [JsonPropertyName("vram_total_mb")]
+    public double? VramTotalMb { get; set; }
+    [JsonPropertyName("vram_allocated_mb")]
+    public double? VramAllocatedMb { get; set; }
+    [JsonPropertyName("vram_reserved_mb")]
+    public double? VramReservedMb { get; set; }
     [JsonPropertyName("watchlist_size")]
     public int WatchlistSize { get; set; }
+
+    public bool IsCuda =>
+        string.Equals(Device, "cuda", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Inference, "cuda", StringComparison.OrdinalIgnoreCase);
 }
 
 public class PlateResult

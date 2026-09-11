@@ -17,9 +17,32 @@
 <MudPaper Class="pa-4" Outlined="true">
     <MudStack Spacing="2">
         <MudTextField @bind-Value="_watchFolder" Label="Папка" Disabled="@_status.Running" />
+        <MudRadioGroup T="string" @bind-Value="_sampleMode" Disabled="@_status.Running">
+            <MudStack Spacing="1">
+                <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Style="flex-wrap:wrap;">
+                    <MudRadio T="string" Value="@ModeFps" Color="Color.Primary">Часто</MudRadio>
+                    <MudNumericField T="double" @bind-Value="_sampleFps" Label="Кадров в секунду" Min="0.2" Max="15" Step="0.5"
+                                     Style="width:180px;" Disabled="@(_status.Running || _sampleMode != ModeFps)" Immediate="true" />
+                </MudStack>
+                <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Style="flex-wrap:wrap;">
+                    <MudRadio T="string" Value="@ModeInterval" Color="Color.Primary">Редко</MudRadio>
+                    <MudNumericField T="int" @bind-Value="_intervalSec" Label="1 кадр каждые … сек" Min="1" Max="60"
+                                     Style="width:180px;" Disabled="@(_status.Running || _sampleMode != ModeInterval)" Immediate="true" />
+                </MudStack>
+                <MudText Typo="Typo.caption">минута видео ≈ @FramesPerMinute кадров</MudText>
+                <MudText Typo="Typo.caption">
+                    @if (_sampleMode == ModeFps)
+                    {
+                        <text>Голосованию нужны 2 кадра одной машины. 3 кадр/с — быстрее, 5 — меньше пропусков на коротком проезде.</text>
+                    }
+                    else
+                    {
+                        <text>Один кадр в 2–5 с сильно ускоряет разбор. Короткая машина в кадре часто попадёт один раз — в БД уйдёт только очень уверенное чтение.</text>
+                    }
+                </MudText>
+            </MudStack>
+        </MudRadioGroup>
         <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Style="flex-wrap:wrap;">
-            <MudNumericField T="int" @bind-Value="_intervalSec" Label="Интервал кадров (сек)" Min="1" Max="60"
-                             Style="width:160px;" Disabled="@_status.Running" Immediate="true" />
             <MudCheckBox T="bool" @bind-Value="_saveToDb" Label="Сохранять в БД" Color="Color.Primary" Disabled="@_status.Running" />
             <MudRadioGroup T="FolderAfterAction" @bind-Value="_afterAction" Disabled="@_status.Running">
                 <MudRadio T="FolderAfterAction" Value="FolderAfterAction.Move" Color="Color.Primary">Перемещать в Processed</MudRadio>
@@ -68,7 +91,7 @@
                        Value="@_status.Percent"
                        Indeterminate="@(_status.Processing && _status.Percent <= 0)"
                        Style="height:8px;" />
-    <MudText Typo="Typo.caption" Class="mt-2">В очереди: @_status.QueueCount · интервал в работе: @_status.Config.IntervalSec с</MudText>
+    <MudText Typo="Typo.caption" Class="mt-2">В очереди: @_status.QueueCount · выборка: @FormatSample(_status.Config)</MudText>
     @if (_status.Queue.Count > 0)
     {
         <MudText Typo="Typo.caption" Color="Color.Secondary">@string.Join(", ", _status.Queue)</MudText>
@@ -95,10 +118,19 @@
 }
 
 @code {
+    private const string ModeFps = "fps";
+    private const string ModeInterval = "interval";
+
     private FolderWatchStatusDto _status = new();
     private string _watchFolder = @"D:\REG_VIDEO";
+    private string _sampleMode = ModeFps;
+    private double _sampleFps = 3.0;
     private int _intervalSec = 2;
     private bool _saveToDb = true;
+    private int FramesPerMinute =>
+        _sampleMode == ModeInterval
+            ? Math.Max(1, (int)Math.Round(60.0 / Math.Max(_intervalSec, 1)))
+            : Math.Max(1, (int)Math.Round(_sampleFps * 60.0));
     private FolderAfterAction _afterAction = FolderAfterAction.Move;
     private bool _busy;
     private System.Threading.Timer? _timer;
@@ -129,7 +161,18 @@
         var snap = WatchState.Snapshot();
         _status = snap;
         _watchFolder = snap.Config.WatchFolder;
-        _intervalSec = Math.Clamp(snap.Config.IntervalSec, 1, 60);
+        if (snap.Config.SampleFps > 0)
+        {
+            _sampleMode = ModeFps;
+            _sampleFps = Math.Clamp(snap.Config.SampleFps, 0.2, 15.0);
+            _intervalSec = snap.Config.IntervalSec > 0 ? Math.Clamp(snap.Config.IntervalSec, 1, 60) : 2;
+        }
+        else
+        {
+            _sampleMode = ModeInterval;
+            _intervalSec = snap.Config.IntervalSec > 0 ? Math.Clamp(snap.Config.IntervalSec, 1, 60) : 2;
+            _sampleFps = 3.0;
+        }
         _saveToDb = snap.Config.SaveToDb;
         _afterAction = snap.Config.AfterAction;
     }
@@ -138,7 +181,16 @@
     {
         var cfg = WatchState.GetConfig();
         cfg.WatchFolder = (_watchFolder ?? "").Trim();
-        cfg.IntervalSec = Math.Clamp(_intervalSec, 1, 60);
+        if (_sampleMode == ModeInterval)
+        {
+            cfg.SampleFps = 0;
+            cfg.IntervalSec = Math.Clamp(_intervalSec, 1, 60);
+        }
+        else
+        {
+            cfg.SampleFps = Math.Clamp(_sampleFps, 0.2, 15.0);
+            cfg.IntervalSec = Math.Clamp((int)Math.Round(1.0 / cfg.SampleFps), 1, 60);
+        }
         cfg.SaveToDb = _saveToDb;
         cfg.AfterAction = _afterAction;
         cfg.MoveSubfolder = string.IsNullOrWhiteSpace(cfg.MoveSubfolder) ? "Processed" : cfg.MoveSubfolder;
@@ -157,7 +209,7 @@
             var cfg = await BuildConfigAsync();
             cfg.Enabled = false;
             WatchState.SaveConfig(cfg);
-            Snackbar.Add($"Настройки сохранены (интервал {cfg.IntervalSec} с)", Severity.Success);
+            Snackbar.Add($"Настройки сохранены ({FormatSample(cfg)})", Severity.Success);
             RefreshStatus();
         }
         finally { _busy = false; }
@@ -177,7 +229,7 @@
             cfg.Enabled = true;
             WatchState.SaveConfig(cfg);
             WatchService.RequestStart();
-            Snackbar.Add($"Мониторинг запущен (интервал {cfg.IntervalSec} с)", Severity.Info);
+            Snackbar.Add($"Мониторинг запущен ({FormatSample(cfg)})", Severity.Info);
             RefreshStatus();
         }
         finally { _busy = false; }
@@ -204,10 +256,21 @@
             var cfg = await BuildConfigAsync();
             WatchState.SaveConfig(cfg);
             WatchService.RequestScanOnce();
-            Snackbar.Add($"Сканирование (интервал {cfg.IntervalSec} с)", Severity.Info);
+            Snackbar.Add($"Сканирование ({FormatSample(cfg)})", Severity.Info);
             RefreshStatus();
         }
         finally { _busy = false; }
+    }
+
+    private static string FormatSample(FolderWatchConfig cfg)
+    {
+        var fps = cfg.SampleFps > 0
+            ? cfg.SampleFps
+            : cfg.IntervalSec > 0 ? 1.0 / cfg.IntervalSec : 3.0;
+        var perMin = Math.Max(1, (int)Math.Round(fps * 60.0));
+        if (cfg.SampleFps <= 0 && cfg.IntervalSec > 0)
+            return $"1 кадр / {cfg.IntervalSec} с · минута ≈ {perMin} кадров";
+        return $"{fps:0.##} кадр/с · минута ≈ {perMin} кадров";
     }
 
     public void Dispose()

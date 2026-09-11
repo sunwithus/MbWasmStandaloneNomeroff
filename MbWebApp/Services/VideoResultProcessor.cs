@@ -346,14 +346,17 @@ public class VideoResultProcessor
                 continue;
             }
 
-            // Кадр для фото — где номер крупнее всего, а не последний: к последнему
-            // кадру машина уже уходит из поля зрения. Берём только среди чтений
-            // этого же текста, иначе кадр и кроп будут от другой машины трека.
-            var matching = track.Detections
-                .Where(d => string.Equals(d.Plate, plate, StringComparison.Ordinal))
-                .ToList();
-            var best = (matching.Count > 0 ? matching : track.Detections)
-                .Aggregate((a, b) => b.BboxArea > a.BboxArea ? b : a);
+            // Кадр для фото — где ЭТОТ номер крупнее всего. Чужой bbox из трека
+            // не берём: иначе в потоке в БД попадает кроп соседней машины.
+            var best = track.BestForPlate(plate);
+            if (best == null)
+            {
+                summary.DroppedByFormat++;
+                _logger.LogInformation(
+                    "Трек #{Id}: {Plate} без своего кадра/кропа — не пишем (не подставляем чужое фото)",
+                    track.Id, plate);
+                continue;
+            }
             var withGps = track.Detections.FirstOrDefault(d => d.Latitude.HasValue && d.Longitude.HasValue);
             pending.Add(new PendingTrackSave
             {
@@ -364,7 +367,9 @@ public class VideoResultProcessor
                 TimeUtc = best.TimeUtc,
                 ImageBase64 = best.FrameImageBase64,
                 PlateImageBase64 = best.PlateImageBase64,
-                Confidence = vote.Confidence,
+                // S_BELONG — уверенность OCR по этому тексту, не «доля победы»
+                // голосования (у одного чтения она всегда ~100%).
+                Confidence = MaxOcrConfidence(track, plate),
                 FrameHits = agreeingHits,
                 HasGps = (best.Latitude ?? withGps?.Latitude).HasValue
                          && (best.Longitude ?? withGps?.Longitude).HasValue,

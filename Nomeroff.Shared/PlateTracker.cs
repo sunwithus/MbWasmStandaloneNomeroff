@@ -33,6 +33,31 @@ public sealed class PlateTrack
         ? throw new InvalidOperationException("Трек пуст")
         : Detections.Aggregate((a, b) => b.BboxArea > a.BboxArea ? b : a);
 
+    /// <summary>
+    /// Фото/кроп только среди чтений этого номера (или того же ствола).
+    /// Иначе в плотном потоке в БД уезжает кадр соседней машины с более крупным bbox.
+    /// </summary>
+    public TrackDetection? BestForPlate(string plate)
+    {
+        if (Detections.Count == 0)
+            return null;
+        var exact = Detections
+            .Where(d => string.Equals(d.Plate, plate, StringComparison.Ordinal))
+            .ToList();
+        if (exact.Count > 0)
+            return exact.Aggregate((a, b) => b.BboxArea > a.BboxArea ? b : a);
+
+        var stem = PlateAlphabet.DedupStem(plate);
+        if (string.IsNullOrEmpty(stem))
+            return null;
+        var sameStem = Detections
+            .Where(d => PlateAlphabet.DedupStem(d.Plate) == stem)
+            .ToList();
+        return sameStem.Count == 0
+            ? null
+            : sameStem.Aggregate((a, b) => b.BboxArea > a.BboxArea ? b : a);
+    }
+
     internal int[]? LastBbox;
     internal double LastSeenSec;
 }
@@ -133,7 +158,10 @@ public sealed class PlateTracker
             if (distance > reach)
                 continue;
 
-            if (!sameStem && (gap > 1.0 || !SizesComparable(track.LastBbox, detection.Bbox)))
+            // Соседство без IoU и без того же ствола: в одном кадре две машины
+            // в потоке (номер через 2–3 своих ширины) слипались в один трек —
+            // в БД уезжал номер одной, фото более крупной соседней.
+            if (!sameStem)
                 continue;
 
             // текстовое совпадение важнее близости: ставим его вперёд по приоритету
@@ -145,18 +173,6 @@ public sealed class PlateTracker
             }
         }
         return best ?? nearby;
-    }
-
-    /// <summary>
-    /// Боксы сопоставимы по размеру. Номер за кадр не удваивается в ширине,
-    /// поэтому резкая разница означает другую машину.
-    /// </summary>
-    private static bool SizesComparable(int[] a, int[] b, double maxRatio = 2.5)
-    {
-        var wa = Math.Max(1.0, Width(a));
-        var wb = Math.Max(1.0, Width(b));
-        var ratio = wa > wb ? wa / wb : wb / wa;
-        return ratio <= maxRatio;
     }
 
     private static bool SameStem(PlateTrack track, string plate)
